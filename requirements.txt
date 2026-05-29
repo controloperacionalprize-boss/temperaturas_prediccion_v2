@@ -6,6 +6,6 @@ pystan>=2.19.0
 cmdstanpy>=1.2.0
 prophet>=1.1.0
 plotly>=5.18.0
-openpyxl>=3.11.0
+openpyxl>=3.0.0
 markdown-it-py>=2.2.0
 rich>=13.0.0
