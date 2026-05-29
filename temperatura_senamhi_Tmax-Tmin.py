@@ -655,7 +655,7 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
     fig = make_subplots(
         rows=n, cols=1,
         shared_xaxes=False,
-        vertical_spacing=0.02,
+        vertical_spacing=0.08,
         subplot_titles=[f for f in fundos]
     )
     
@@ -728,23 +728,6 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
             pred_fc = forecast.reset_index(drop=True)
         else:
             pred_fc = pd.DataFrame()
-        
-        # Mensajes de MAE simplificados
-        if mae is not None:
-            if mae <= 1.2:
-                st.success(
-                    f"✅ **{fundo} — {variable}**: MAE = {mae}°C "
-                    f"(d+1: {mae_por_dia.get(1, '—')}°C)"
-                )
-            elif mae <= 2.0:
-                st.info(
-                    f"ℹ️ **{fundo} — {variable}**: MAE = {mae}°C "
-                    f"(aceptable)"
-                )
-            else:
-                st.warning(
-                    f"⚠️ **{fundo} — {variable}**: MAE = {mae}°C (alto)"
-                )
         
         lg = fundo
         
@@ -891,7 +874,7 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
 
     
     fig.update_layout(
-        height=250 * n,
+        height=320 * n,
         paper_bgcolor=fig_bg,
         plot_bgcolor='rgba(0,0,0,0)',
         font=dict(family='Arial', size=9, color='#333333'),
@@ -902,7 +885,7 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
         ),
         margin=dict(l=60, r=40, t=60, b=40),
         legend=dict(
-            orientation='h', yanchor='bottom', y=-0.04,
+            orientation='h', yanchor='top', y=-0.08,
             xanchor='left', x=0, font=dict(size=8),
             bgcolor='rgba(0,0,0,0)', borderwidth=0
         ),
@@ -913,7 +896,7 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
             "Fuente: SENAMHI Normales Climatológicas 1991-2020 | "
             "Predicción: Prophet"
         ),
-        xref='paper', yref='paper', x=0, y=-0.03,
+        xref='paper', yref='paper', x=0, y=-0.12,
         showarrow=False,
         font=dict(size=7, color='#546E7A', style='italic'),
         xanchor='left'
@@ -1204,12 +1187,8 @@ with st.sidebar:
     
     # Sección 1: Archivo
     with st.expander("📂 **Archivo meteorológico**", expanded=True):
-        file_meteo = st.file_uploader(
-            "Carga CSV o XLSX",
-            type=['csv', 'xlsx'],
-            key='meteo',
-            help="CSV recomendado para carga más rápida"
-        )
+        st.markdown("### 📊 **Archivo meteorológico**")
+        st.info("✅ Leyendo: `assets/Metereologia_Prize.xlsx`")
     
     st.divider()
     
@@ -1246,22 +1225,37 @@ if normales is None:
 
 MEDIA_TMAX, Q1_TMAX, Q3_TMAX, MEDIA_TMIN, Q1_TMIN, Q3_TMIN, estaciones_tmax = normales
 
-# ──── SIN ARCHIVO ────
-if file_meteo is None:
-    st.markdown("""
-    <div class="info-box">
-        📌 Sube el archivo de meteorología en la barra lateral para comenzar.
-    </div>
-    """, unsafe_allow_html=True)
-    st.stop()
+# ──── LECTURA DIRECTA DEL ARCHIVO ────
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+METEO_PATH = os.path.join(SCRIPT_DIR, "assets", "Metereologia_Prize.xlsx")
 
-# ──── LECTURA Y PROCESAMIENTO ────
-meteo_bytes = file_meteo.read()
-filename = file_meteo.name
+# Intentar rutas alternativas si la principal no existe
+if not os.path.exists(METEO_PATH):
+    alt_paths = [
+        "assets/Metereologia_Prize.xlsx",
+        "./assets/Metereologia_Prize.xlsx",
+        "../assets/Metereologia_Prize.xlsx",
+    ]
+    for alt_path in alt_paths:
+        if os.path.exists(alt_path):
+            METEO_PATH = alt_path
+            break
 
-with st.spinner(f"Leyendo {filename} (optimizado)..."):
+with st.spinner(f"Leyendo meteorología (optimizado)..."):
     try:
+        if not os.path.exists(METEO_PATH):
+            st.error(f"❌ Archivo no encontrado en: {METEO_PATH}")
+            st.info("📂 Rutas buscadas:")
+            st.code(f"{SCRIPT_DIR}/assets/Metereologia_Prize.xlsx\n./assets/Metereologia_Prize.xlsx")
+            st.stop()
+        
+        # Leer archivo directamente desde disco
+        with open(METEO_PATH, 'rb') as f:
+            meteo_bytes = f.read()
+        
+        filename = "Metereologia_Prize.xlsx"
         df_preview = leer_meteo_bytes_optimizado(meteo_bytes, filename)
+        
         if 'Fundo' not in df_preview.columns:
             st.error(f"Columna `Fundo` no encontrada.")
             st.stop()
@@ -1380,17 +1374,7 @@ if mostrar_tmax and tab_tmax is not None:
             )
             dias_pred_mostrar_num = int(dias_pred_mostrar.replace('d', ''))
         
-        with col2:
-            st.markdown("#### 📈 Tipo de visualización")
-            tipo_viz_tmax = st.radio(
-                "Mostrar como:",
-                options=['Línea', 'Range Plot'],
-                index=0,
-                horizontal=True,
-                key='tipo_viz_tmax'
-            )
-        
-        tipo_viz_tmax_lower = 'linea' if tipo_viz_tmax == 'Línea' else 'candlestick'
+        tipo_viz_tmax_lower = 'linea'
         
         with st.spinner("Generando Tmax..."):
             fig_tmax, df_tmax_hist, df_tmax_pred = generar_figura(
@@ -1418,17 +1402,7 @@ if mostrar_tmin and tab_tmin is not None:
             )
             dias_pred_mostrar_num = int(dias_pred_mostrar.replace('d', ''))
         
-        with col2:
-            st.markdown("#### 📈 Tipo de visualización")
-            tipo_viz_tmin = st.radio(
-                "Mostrar como:",
-                options=['Línea', 'Range Plot'],
-                index=0,
-                horizontal=True,
-                key='tipo_viz_tmin'
-            )
-        
-        tipo_viz_tmin_lower = 'linea' if tipo_viz_tmin == 'Línea' else 'candlestick'
+        tipo_viz_tmin_lower = 'linea'
         
         with st.spinner("Generando Tmin..."):
             fig_tmin, df_tmin_hist, df_tmin_pred = generar_figura(
@@ -1505,6 +1479,6 @@ with tab_datos:
 
 st.markdown("""
 <div class="footer-note">
-    Aquanqa · OPTIMIZADO v3.3 · Lectura 5-10x más rápida · Cache inteligente
+    Elaborado por la Gerencia de Planificación, Control Operacional y Gestión
 </div>
 """, unsafe_allow_html=True)
