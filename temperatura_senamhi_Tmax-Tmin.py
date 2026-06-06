@@ -15,6 +15,7 @@ Ejecutar:
 
 import warnings
 warnings.filterwarnings('ignore')
+import calendar
 
 import logging
 logging.getLogger('prophet').setLevel(logging.ERROR)
@@ -186,19 +187,21 @@ ROLLING_DIAS    = 3
 SIGMA_CLIM      = 1.5
 Z_Q             = 0.6745
 DELTA_Q         = round(SIGMA_CLIM * Z_Q, 2)
-TMAX_MIN, TMAX_MAX = 18.0, 40.0
-TMIN_MIN, TMIN_MAX = 10.0, 30.0
+
+TMAX_MIN, TMAX_MAX = 10.0, 45.0
+TMIN_MIN, TMIN_MAX =  5.0, 35.0
 
 GRID_COLOR      = '#CFD8DC'
-BG_TMAX         = '#FFF1F1'
+BG_TMAX = '#FFFFFF'
 BANDA_TMAX      = '#FFCDD2'
 CLIM_TMAX       = '#C62828'
 REAL_TMAX_COLOR = '#000000'
-BG_TMIN         = '#EEF5FF'
+BG_TMIN = '#FFFFFF'
 BANDA_TMIN      = '#BBDEFB'
 CLIM_TMIN       = '#1565C0'
 REAL_TMIN_COLOR = '#000000'
-PRED_COLOR      = '#FF0000'
+PRED_COLOR_TMAX = '#FF0000'
+PRED_COLOR_TMIN = '#1565C0'
 
 MESES_RAW = [
     'Enero','Febrero','Marzo','Abril','Mayo','Junio',
@@ -230,37 +233,20 @@ def _normalizar(s: str) -> str:
 # ══════════════════════════════════════════════════════════════
 # LECTURA OPTIMIZADA
 # ══════════════════════════════════════════════════════════════
-
 @st.cache_data(show_spinner=False)
 def leer_meteo_bytes_optimizado(file_bytes: bytes, filename: str, sheet: str = SHEET_NAME) -> pd.DataFrame:
-    """Lectura inteligente: pandas es más rápido que intentar múltiples formatos."""
     ext = filename.lower().rsplit('.', 1)[-1]
-    
+
     if ext == 'csv':
-        # Pandas autodetecta separador con esta combinación
         try:
             df = pd.read_csv(
                 io.BytesIO(file_bytes),
-                encoding='utf-8-sig',  # UTF-8 con BOM
-                sep=None,              # autodetecta
-                engine='python',       # mejor para auto-detección
-                on_bad_lines='skip',   # ignora líneas malformadas
+                encoding='utf-8-sig',
+                sep=None,
+                engine='python',
+                on_bad_lines='skip',
             )
-            # Detectar decimal (punto o coma)
-            if df.select_dtypes(include=['object']).shape[1] > 0:
-                test_col = df.select_dtypes(include=['object']).iloc[:, 0]
-                if ',' in str(test_col.iloc[0]):
-                    # Releer con coma como decimal
-                    df = pd.read_csv(
-                        io.BytesIO(file_bytes),
-                        encoding='utf-8-sig',
-                        sep=None,
-                        engine='python',
-                        decimal=',',
-                        on_bad_lines='skip',
-                    )
         except Exception:
-            # Fallback: intentar con latin-1
             df = pd.read_csv(
                 io.BytesIO(file_bytes),
                 encoding='latin-1',
@@ -269,14 +255,18 @@ def leer_meteo_bytes_optimizado(file_bytes: bytes, filename: str, sheet: str = S
                 on_bad_lines='skip',
             )
         return df
-    
+
     elif ext == 'xlsx':
-        # openpyxl es más rápido que xlrd para .xlsx moderno
-        return pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet)
-    
+        return pd.read_excel(
+            io.BytesIO(file_bytes),
+            sheet_name=sheet,
+            # ✅ No parsear fechas aquí — lo hacemos en cargar_meteoro
+            # para controlar el formato exacto
+            parse_dates=False,
+        )
+
     else:
         raise ValueError(f"Extensión no soportada: .{ext}")
-
 # ══════════════════════════════════════════════════════════════
 # SPLINE CON CACHE
 # ══════════════════════════════════════════════════════════════
@@ -365,48 +355,86 @@ def cargar_normales(_file_bytes, hoja):
 
 @st.cache_data(show_spinner=False)
 def cargar_meteoro_optimizado(_file_bytes, filename, sheet, fundos_sel, min_reg):
-    """Versión optimizada: vectorización completa."""
+    """
+    Carga y procesa datos meteorológicos cada 15 min a diarios.
+    
+    Fixes aplicados:
+    - Formato de fecha M/DD/YYYY detectado automáticamente
+    - 96 registros por día (cada 15 min) como base
+    - Rangos amplios 5-45°C para no descartar datos reales
+    - Último día por fundo siempre incluido
+    - Protección si ET-mm no existe
+    """
     df = leer_meteo_bytes_optimizado(_file_bytes, filename, sheet)
-    
-    # Conversiones en una pasada
-    df['Fecha-Hora'] = pd.to_datetime(df['Fecha-Hora'], errors='coerce')
+
+    # ── 1. Fechas con detección de formato ────────────────────
+    # El Excel tiene formato M/DD/YYYY HH:MM (americano)
+    # dayfirst=False asegura que 6/01/2026 = 1 de junio, no 6 de enero
+    df['Fecha-Hora'] = pd.to_datetime(
+        df['Fecha-Hora'],
+        dayfirst=False,   # ← M/DD/YYYY: el primero es el MES
+        errors='coerce'
+    )
     df = df.dropna(subset=['Fecha-Hora'])
-    
-    # Vectorizar conversiones numéricas
+
+    # ── 2. Numéricos ───────────────────────────────────────────
     for col in ['Temp-C', 'TempAlta-C', 'TempBaja-C']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-    
-    # Filtro vectorizado
+
+    # ── 3. Filtro de rango — solo elimina basura del sensor ────
     df = df[
         (df['TempAlta-C'] >= TMAX_MIN) & (df['TempAlta-C'] <= TMAX_MAX) &
         (df['TempBaja-C'] >= TMIN_MIN) & (df['TempBaja-C'] <= TMIN_MAX)
     ].copy()
-    
+
+    # ── 4. Protección ET-mm ────────────────────────────────────
+    if 'ET-mm' not in df.columns:
+        df['ET-mm'] = 0.0
+
+    # ── 5. Fecha diaria normalizada ────────────────────────────
     df['Fecha'] = df['Fecha-Hora'].dt.normalize()
-    
-    # Agregación eficiente
+
+    # ── 6. Conteo de registros por fundo+fecha ─────────────────
+    # Con datos cada 15 min → día completo = 96 registros
+    # min_reg=80 equivale a tener al menos 20 horas de datos
     reg = df.groupby(['Fundo', 'Fecha'], as_index=False).size()
     reg.columns = ['Fundo', 'Fecha', 'N_registros']
     df = df.merge(reg, on=['Fundo', 'Fecha'], how='left')
-    df = df[df['N_registros'] >= min_reg]
-    
+
+
+    fecha_max_por_fundo = (
+        df.groupby('Fundo')['Fecha']
+          .max()
+          .reset_index()
+          .rename(columns={'Fecha': 'Fecha_max_fundo'})
+    )
+    df = df.merge(fecha_max_por_fundo, on='Fundo', how='left')
+
+    df = df[
+        (df['N_registros'] >= min_reg) |
+        (df['Fecha'] == df['Fecha_max_fundo'])
+    ].copy()
+
+    df = df.drop(columns=['Fecha_max_fundo'])
+
+    # ── 8. Filtro por fundos seleccionados ─────────────────────
     if fundos_sel:
         df = df[df['Fundo'].isin(fundos_sel)]
-    
-    # Agregación diaria - Tmax/Tmin como max/min, ET como suma de ET-mm
+
+    # ── 9. Agregación diaria ───────────────────────────────────
     dia = (
         df.groupby(['Empresa', 'Fundo', 'Fecha'], as_index=False)
           .agg(
-              Tmax=('TempAlta-C', 'max'), 
+              Tmax=('TempAlta-C', 'max'),
               Tmin=('TempBaja-C', 'min'),
-              ET=('ET-mm', 'sum')
+              ET=('ET-mm',        'sum'),
           )
     )
     dia[['Tmax', 'Tmin', 'ET']] = dia[['Tmax', 'Tmin', 'ET']].round(2)
     dia = dia.sort_values(['Fundo', 'Fecha']).reset_index(drop=True)
-    
-    # Suavizado con rolling (vectorizado automáticamente)
+
+    # ── 10. Suavizado rolling 3 días ───────────────────────────
     dia['Tmax_smooth'] = (
         dia.groupby('Fundo')['Tmax']
            .transform(lambda x: x.rolling(ROLLING_DIAS, center=True, min_periods=1).mean())
@@ -417,23 +445,21 @@ def cargar_meteoro_optimizado(_file_bytes, filename, sheet, fundos_sel, min_reg)
            .transform(lambda x: x.rolling(ROLLING_DIAS, center=True, min_periods=1).mean())
            .round(2)
     )
-    
-    return dia
 
+    return dia
 # ══════════════════════════════════════════════════════════════
 # PROPHET OPTIMIZADO - con cache por hash
 # ══════════════════════════════════════════════════════════════
-
 def _hash_serie(serie_bytes: bytes) -> str:
     """Hash de la serie para cache."""
     return hashlib.md5(serie_bytes).hexdigest()[:12]
 
 @st.cache_data(show_spinner=False)
-def entrenar_prophet_opt(_serie_hash: str, _serie_bytes: bytes, dias_pred: int, 
+def entrenar_prophet_opt(_serie_hash: str, _serie_bytes: bytes, dias_pred: int,
                          variable: str, fundo: str):
-    """Prophet con validación eficiente."""
+    """Prophet con historial completo + peso a datos recientes."""
     serie = pd.read_parquet(io.BytesIO(_serie_bytes))
-    
+
     df = (
         serie.rename(columns={'Fecha': 'ds', 'Valor': 'y'})
              .dropna()
@@ -441,132 +467,677 @@ def entrenar_prophet_opt(_serie_hash: str, _serie_bytes: bytes, dias_pred: int,
              .reset_index(drop=True)
     )
     df['ds'] = pd.to_datetime(df['ds']).dt.tz_localize(None)
-    df = df[df['ds'] >= df['ds'].max() - pd.Timedelta(days=730)].copy()
-    
-    # Outlier clipping vectorizado
+
     media = df['y'].mean()
     std = df['y'].std()
-    df['y'] = np.clip(df['y'], media - 2.5 * std, media + 2.5 * std)
-    
-    # Validación cruzada eficiente (menos iteraciones si datos pequeños)
+    df['y'] = np.clip(df['y'], media - 3.0 * std, media + 3.0 * std)
+
+    df['weight'] = 1.0
+    mask_reciente = df['ds'] >= df['ds'].max() - pd.Timedelta(days=180)
+    df.loc[mask_reciente, 'weight'] = 2.5
+
+    # Validación cruzada walk-forward
     n_total = len(df)
-    n_validacion = min(20, max(10, n_total // 5))  # Reducido
-    mae_por_h_listas = {h: [] for h in range(1, min(dias_pred + 1, 8))}  # Solo hasta 7 días
-    
+    n_validacion = min(15, max(10, n_total // 8))
+    mae_por_h_listas = {h: [] for h in range(1, min(dias_pred + 1, 31))}
+
     if n_validacion >= 10:
         for i in range(n_validacion):
             corte = n_total - n_validacion + i
-            train = df.iloc[:corte]
-            test = df.iloc[corte:corte + dias_pred]
-            
+            train = df.iloc[:corte].copy()
+            test  = df.iloc[corte:corte + dias_pred].copy()
+
             if len(test) < 1 or len(train) < 30:
                 break
-            
+
+            train['weight'] = 1.0
+            mask_rec_train = train['ds'] >= train['ds'].max() - pd.Timedelta(days=180)
+            train.loc[mask_rec_train, 'weight'] = 2.5
+
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     m = Prophet(
                         yearly_seasonality=10,
-                        weekly_seasonality=3,
+                        weekly_seasonality=False,
                         daily_seasonality=False,
                         seasonality_mode='additive',
-                        changepoint_prior_scale=0.1,
+                        changepoint_prior_scale=0.30,
                         seasonality_prior_scale=10.0,
                         interval_width=0.95,
                     )
+                    m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+                    m.add_seasonality(name='weekly', period=7, fourier_order=4)
+                    m.add_seasonality(name='biweekly', period=14, fourier_order=3)
+
                     m.fit(train)
                     future = m.make_future_dataframe(periods=len(test), freq='D')
                     pred = m.predict(future).tail(len(test))
-                
+
                 for h, (real, yhat) in enumerate(
                     zip(test['y'].values, pred['yhat'].values), 1
                 ):
-                    if h <= 7:  # Solo guardar hasta 7 días
+                    if h <= 30:
                         mae_por_h_listas[h].append(abs(real - yhat))
             except Exception:
                 continue
-    
-    # Calcular todos_errores ANTES de transformar mae_por_h
+
     todos_errores = [e for errs in mae_por_h_listas.values() for e in errs]
     mae_real = round(float(np.mean(todos_errores)), 3) if todos_errores else None
-    
-    # Ahora transformar a promedios
+
     mae_por_h = {
         h: round(float(np.mean(errs)), 3) if errs else None
         for h, errs in mae_por_h_listas.items()
     }
-    
+
     # Modelo final
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         modelo = Prophet(
-            yearly_seasonality=10,
-            weekly_seasonality=3,
+            yearly_seasonality=15,
+            weekly_seasonality=False,
             daily_seasonality=False,
             seasonality_mode='additive',
-            changepoint_prior_scale=0.1,
-            seasonality_prior_scale=10.0,
+            changepoint_prior_scale=0.30,
+            seasonality_prior_scale=15.0,
             interval_width=0.95,
         )
+        modelo.add_seasonality(name='monthly', period=30.5, fourier_order=5)
         modelo.fit(df)
         future = modelo.make_future_dataframe(periods=dias_pred, freq='D')
         forecast = modelo.predict(future)
-    
-    result = forecast.tail(dias_pred)[
+
+    # ── Forecast futuro (solo dias_pred hacia adelante) ────────
+    result_futuro = forecast.tail(dias_pred)[
         ['ds', 'yhat', 'yhat_lower', 'yhat_upper']
     ].copy().reset_index(drop=True)
-    
-    margen = 3.0
+
+    # ── Forecast histórico COMPLETO (todas las fechas del future) ──
+    result_historico = forecast[
+        ['ds', 'yhat', 'yhat_lower', 'yhat_upper']
+    ].copy().reset_index(drop=True)
+
+    margen = 5.0
     for col in ['yhat', 'yhat_lower', 'yhat_upper']:
-        result[col] = np.clip(result[col], df['y'].min() - margen, df['y'].max() + margen)
-    
-    result['ds'] = pd.to_datetime(result['ds']).dt.tz_localize(None).dt.normalize()
-    
-    return result, mae_real, mae_por_h
+        result_futuro[col] = np.clip(
+            result_futuro[col],
+            df['y'].min() - margen,
+            df['y'].max() + margen
+        )
+
+    result_futuro['ds'] = pd.to_datetime(
+        result_futuro['ds']
+    ).dt.tz_localize(None).dt.normalize()
+
+    result_historico['ds'] = pd.to_datetime(
+        result_historico['ds']
+    ).dt.tz_localize(None).dt.normalize()
+
+    return result_futuro, result_historico, mae_real, mae_por_h
 
 def entrenar_todos_optimizado(dia, dias_pred):
     """Entrena todos los modelos con progreso."""
     forecasts = {}
-    fundos = dia['Fundo'].unique().tolist()
-    variables = ['Tmax', 'Tmin']
-    total = len(fundos) * len(variables)
-    
+    fundos    = dia['Fundo'].unique().tolist()
+    variables = ['Tmax', 'Tmin', 'ET']
+    total     = len(fundos) * len(variables)
+
     prog = st.progress(0, text="Entrenando modelos Prophet...")
-    
+
     for idx, (fundo, variable) in enumerate(
         [(f, v) for f in fundos for v in variables]
     ):
         sub = dia[dia['Fundo'] == fundo].copy()
         if sub.empty:
             continue
-        
+
+        if variable == 'ET':
+            sub = sub[sub['ET'] > 0].copy()
+            if len(sub) < 30:
+                continue
+
+        # ── Recortar hasta fin del mes anterior para que Prophet
+        #    prediga desde el 1 del mes actual en adelante ──────
+        fecha_max_sub = pd.to_datetime(sub['Fecha'].max()).normalize()
+        primer_dia_mes = fecha_max_sub.replace(day=1)
+        fecha_corte = primer_dia_mes - pd.Timedelta(days=1)  # 31/May
+        sub = sub[sub['Fecha'] <= fecha_corte].copy()
+
+        if len(sub) < 30:
+            continue
+
         serie = sub[['Fecha', variable]].rename(columns={variable: 'Valor'})
-        buf = io.BytesIO()
+        buf   = io.BytesIO()
         serie.to_parquet(buf, index=False)
         buf.seek(0)
         serie_bytes = buf.getvalue()
-        serie_hash = _hash_serie(serie_bytes)
-        
-        forecast, mae_real, mae_por_h = entrenar_prophet_opt(
-            serie_hash, serie_bytes, dias_pred, variable, fundo
+        serie_hash  = _hash_serie(serie_bytes)
+
+        # Calcular días necesarios para cubrir desde 1 del mes actual
+        fecha_ultimo = pd.to_datetime(serie['Fecha'].max()).normalize()
+        primer_dia_mes = fecha_ultimo.replace(day=1)
+        dias_hasta_fin_mes = (
+            pd.Timestamp(
+                year=primer_dia_mes.year,
+                month=primer_dia_mes.month,
+                day=calendar.monthrange(primer_dia_mes.year, primer_dia_mes.month)[1]
+            ) - fecha_ultimo
+        ).days
+        dias_pred_real = max(dias_pred, dias_hasta_fin_mes)
+
+        forecast, forecast_hist, mae_real, mae_por_h = entrenar_prophet_opt(
+            serie_hash, serie_bytes, dias_pred_real, variable, fundo
         )
+
+        if variable == 'ET':
+            for col in ['yhat', 'yhat_lower', 'yhat_upper']:
+                forecast[col]      = forecast[col].clip(lower=0)
+                forecast_hist[col] = forecast_hist[col].clip(lower=0)
+
         forecasts[(fundo, variable)] = {
-            'forecast': forecast,
-            'mae': mae_real,
-            'mae_por_dia': mae_por_h,
+            'forecast'     : forecast,
+            'forecast_hist': forecast_hist,
+            'mae'          : mae_real,
+            'mae_por_dia'  : mae_por_h,
         }
-        
+
         prog.progress(
             (idx + 1) / total,
             text=f"Prophet {fundo} — {variable}  ({idx + 1}/{total})..."
         )
-    
+
     prog.empty()
     return forecasts
 
-# ══════════════════════════════════════════════════════════════
-# FIGURA OPTIMIZADA (reducida pero igual de buena)
-# ══════════════════════════════════════════════════════════════
+
+def generar_tab_et(dia, forecasts_cache, dias_pred_ui):
+    """Gráfico ET diaria + predicción mes siguiente por fundo."""
+    import calendar
+
+    fundos = dia['Fundo'].unique().tolist()
+    anio_actual = pd.Timestamp.today().year
+    fecha_ini_anio = pd.Timestamp(year=anio_actual - 1, month=1, day=1)
+
+    n = len(fundos)
+    fig = make_subplots(
+        rows=n, cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.08,
+        subplot_titles=[f for f in fundos]
+    )
+
+    for i, fundo in enumerate(fundos):
+        row = i + 1
+
+        sub = dia[
+            (dia['Fundo'] == fundo) &
+            (dia['Fecha'] >= fecha_ini_anio)
+        ].copy().reset_index(drop=True)
+
+        if sub.empty or 'ET' not in sub.columns:
+            continue
+
+        et_df = sub[['Fecha', 'ET']].dropna().copy()
+        if et_df.empty or et_df['ET'].sum() == 0:
+            continue
+
+        empresa  = sub['Empresa'].iloc[0]
+        et_total = et_df['ET'].sum().round(2)
+        et_prom  = et_df['ET'].mean().round(2)
+
+        # ── Fechas clave ───────────────────────────────────────
+        fecha_fin_raw         = pd.to_datetime(et_df['Fecha'].max()).normalize()
+        primer_dia_mes_actual = fecha_fin_raw.replace(day=1)
+        fecha_fin_norm        = primer_dia_mes_actual - pd.Timedelta(days=1)  # 31 mayo
+        ultimo_dia_mes_actual = pd.Timestamp(
+            year=primer_dia_mes_actual.year,
+            month=primer_dia_mes_actual.month,
+            day=calendar.monthrange(
+                primer_dia_mes_actual.year,
+                primer_dia_mes_actual.month
+            )[1]
+        )  # 30 junio
+
+        # ── Datos reales — TODOS los disponibles ──────────────
+        et_real = et_df[et_df['Fecha'] <= fecha_fin_norm].copy()
+
+
+        # ── Línea real ─────────────────────────────────────────
+        fig.add_trace(go.Scatter(
+            x=et_real['Fecha'],
+            y=et_real['ET'],
+            mode='lines+markers',
+            line=dict(color='#1565C0', width=1.8),
+            marker=dict(size=4, color='white', line=dict(color='#1565C0', width=1.2)),
+            name='ET real',
+            showlegend=(i == 0),
+            fill='tozeroy',
+            fillcolor='rgba(21, 101, 192, 0.08)',
+            hovertemplate='%{x|%d/%b/%Y}<br>ET: %{y:.2f} mm<extra>' + fundo + '</extra>'
+        ), row=row, col=1)
+
+        # ── Línea promedio ─────────────────────────────────────
+        fig.add_hline(
+            y=et_prom,
+            line=dict(color='#FF6F00', width=1.5, dash='dot'),
+            annotation_text=f"Prom: {et_prom:.2f} mm/día",
+            annotation_position="top right",
+            annotation_font=dict(size=8, color='#FF6F00'),
+            row=row, col=1
+        )
+
+        # ── Anotación último valor real ────────────────────────
+        fig.add_annotation(
+            x=et_real['Fecha'].iloc[-1],
+            y=float(et_real['ET'].iloc[-1]),
+            text=f"<b>{float(et_real['ET'].iloc[-1]):.2f}</b>",
+            showarrow=True, arrowhead=2,
+            arrowcolor='#1565C0', arrowwidth=1.0,
+            ax=14, ay=-18,
+            font=dict(size=9, color='#1565C0'),
+            row=row, col=1
+        )
+
+        # ── Línea vertical 31 mayo ─────────────────────────────
+        fig.add_vline(
+            x=fecha_fin_norm,
+            line=dict(color='#546E7A', width=1.2, dash='dot'),
+            row=row, col=1
+        )
+
+        # ── Predicción Prophet ─────────────────────────────────
+        cache_entry = forecasts_cache.get((fundo, 'ET'), {})
+        forecast_et = cache_entry.get('forecast', pd.DataFrame())
+
+        if not forecast_et.empty:
+            forecast_et = forecast_et.copy()
+            forecast_et['ds'] = pd.to_datetime(
+                forecast_et['ds']
+            ).dt.tz_localize(None).dt.normalize()
+
+            # Mes completo desde 1 junio hasta 30 junio
+            pred_et = forecast_et[
+                (forecast_et['ds'] >= primer_dia_mes_actual) &
+                (forecast_et['ds'] <= ultimo_dia_mes_actual)
+            ].reset_index(drop=True)
+            # ── Calcular amplitud histórica del mismo mes ──────────
+            mes_actual = primer_dia_mes_actual.month
+            et_mismo_mes = et_df[
+                pd.to_datetime(et_df['Fecha']).dt.month == mes_actual
+            ]['ET']
+
+            if len(et_mismo_mes) >= 5:
+                    std_historica = et_mismo_mes.std()
+                    amp_max = et_mismo_mes.max()
+                    amp_min = et_mismo_mes.min()
+            else:
+                    std_historica = et_df['ET'].std()
+                    amp_max = et_df['ET'].max()
+                    amp_min = et_df['ET'].min()
+
+                # ← AQUÍ, fuera del else, siempre se ejecuta
+            pred_et = pred_et.copy()
+            ventana_patron = min(30, len(et_real))
+            et_ventana = et_real['ET'].values[-ventana_patron:]
+            media_ventana = et_ventana.mean()
+            desviacion = et_ventana - media_ventana
+
+            n_pred = len(pred_et)
+            indices = [j % len(desviacion) for j in range(n_pred)]
+            patron_ciclado = desviacion[indices]
+
+            std_actual = np.std(desviacion)
+            factor = std_historica / (std_actual + 1e-6)
+            factor = min(factor, 1.5)
+
+            pred_et['yhat'] = (
+                pred_et['yhat'] + patron_ciclado * factor
+            ).clip(lower=0).round(2)
+
+            pred_et['yhat_upper'] = (pred_et['yhat'] + std_historica * 0.8).clip(upper=float(amp_max)).round(2)
+            pred_et['yhat_lower'] = (pred_et['yhat'] - std_historica * 0.8).clip(lower=0.0).round(2)
+            if not pred_et.empty:
+                # Conector desde 31 mayo → 1 junio predicho
+                et_val_ultimo = float(et_real['ET'].iloc[-1])
+                fig.add_trace(go.Scatter(
+                    x=[et_real['Fecha'].iloc[-1], pred_et['ds'].iloc[0]],
+                    y=[et_val_ultimo, float(pred_et['yhat'].iloc[0])],
+                    mode='lines',
+                    line=dict(color='#43A047', width=1.8, dash='dash'),
+                    showlegend=False, hoverinfo='skip'
+                ), row=row, col=1)
+
+                # Banda IC 95%
+                fig.add_trace(go.Scatter(
+                    x=pred_et['ds'].tolist() + pred_et['ds'].tolist()[::-1],
+                    y=pred_et['yhat_upper'].tolist() + pred_et['yhat_lower'].tolist()[::-1],
+                    fill='toself',
+                    fillcolor='rgba(67, 160, 71, 0.12)',
+                    line=dict(color='rgba(0,0,0,0)'),
+                    showlegend=False, hoverinfo='skip'
+                ), row=row, col=1)
+
+                # Línea predicción
+                fig.add_trace(go.Scatter(
+                    x=pred_et['ds'],
+                    y=pred_et['yhat'],
+                    mode='lines+markers',
+                    line=dict(color='#43A047', width=2.5, dash='dash'),
+                    marker=dict(size=4, color='#43A047'),
+                    name='ET predicha',
+                    showlegend=(i == 0),
+                    hovertemplate='%{x|%d/%b/%Y}<br>ET pred: %{y:.2f} mm<extra>Prophet</extra>'
+                ), row=row, col=1)
+
+                # Anotación último valor predicho
+                fig.add_annotation(
+                    x=pred_et['ds'].iloc[-1],
+                    y=float(pred_et['yhat'].iloc[-1]),
+                    text=f"<b>{float(pred_et['yhat'].iloc[-1]):.2f}</b>",
+                    showarrow=True, arrowhead=2,
+                    arrowcolor='#43A047', arrowwidth=1.0,
+                    ax=-28, ay=-18,
+                    font=dict(size=9, color='#43A047'),
+                    row=row, col=1
+                )
+
+        # ── Título subplot ─────────────────────────────────────
+        fig.layout.annotations[i].update(
+            text=(
+                f"<b>{empresa} — {fundo} — ET</b>  "
+                f"<span style='font-size:9px;color:#546E7A'>"
+                f"Total real: {et_total:.1f} mm | "
+                f"Prom: {et_prom:.2f} mm/día | "
+                f"Pred: {primer_dia_mes_actual.strftime('%b %Y')} · Rango basado en σ histórica ±{std_historica:.2f} mm"
+                f"</span>"
+            ),
+            font=dict(size=11, color='#1A1A1A'),
+            x=0.0, xanchor='left'
+        )
+
+        xk = 'xaxis' if row == 1 else f'xaxis{row}'
+        fig.layout[xk].update(
+            range=[
+                et_real['Fecha'].min(),
+                ultimo_dia_mes_actual + pd.Timedelta(days=2)
+            ],
+            tickformat='%d/%b',
+            gridcolor=GRID_COLOR, gridwidth=0.5,
+            showgrid=True, zeroline=False,
+        )
+        yk = 'yaxis' if row == 1 else f'yaxis{row}'
+        fig.layout[yk].update(
+            title='mm/día',
+            gridcolor=GRID_COLOR, gridwidth=0.5,
+            showgrid=True, zeroline=True,
+            rangemode='tozero'
+        )
+
+    fig.update_layout(
+        height=300 * n,
+        paper_bgcolor='#FFFFFF',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Arial', size=9, color='#333333'),
+        title=dict(
+            text="<b>💧 Evapotranspiración diaria — FUNDOS AQUANQA</b>",
+            font=dict(size=14, color='#1A1A1A'),
+            x=0.0, xanchor='left', pad=dict(t=10, l=10)
+        ),
+        margin=dict(l=60, r=40, t=60, b=40),
+        legend=dict(
+            orientation='h', yanchor='top', y=-0.05,
+            xanchor='left', x=0, font=dict(size=8),
+            bgcolor='rgba(0,0,0,0)', borderwidth=0
+        ),
+        hovermode='x unified'
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key="fig_et_main")
+
+    # ── KPIs resumen ───────────────────────────────────────────
+    st.markdown("#### 📊 Resumen ET por fundo")
+    cols = st.columns(len(fundos))
+    for i, fundo in enumerate(fundos):
+        sub_et = dia[
+            (dia['Fundo'] == fundo) &
+            (dia['Fecha'] >= fecha_ini_anio)
+        ]['ET'].dropna()
+        if not sub_et.empty:
+            cols[i].metric(
+                fundo,
+                f"{sub_et.sum():.1f} mm",
+                f"Prom {sub_et.mean():.2f} mm/día"
+            )
+
+
+def generar_seccion_validacion(variable, dia, forecasts_cache, dias_pred_ui):
+    """
+    Muestra sección expandible con comparación real vs Prophet
+    para el mes anterior completo, por fundo.
+    """
+    import calendar
+
+    fundos = dia['Fundo'].unique().tolist()
+
+    with st.expander(f"📊 Validación Prophet — {variable} (mes anterior)", expanded=False):
+
+        for fundo in fundos:
+            sub = dia[dia['Fundo'] == fundo].copy().reset_index(drop=True)
+            if sub.empty:
+                continue
+
+            # ── Determinar mes anterior ────────────────────────────
+            fecha_max = pd.to_datetime(sub['Fecha'].max()).normalize()
+            primer_dia_mes_actual = fecha_max.replace(day=1)
+            ultimo_dia_mes_ant = primer_dia_mes_actual - pd.Timedelta(days=1)
+            primer_dia_mes_ant = ultimo_dia_mes_ant.replace(day=1)
+
+            # ── Datos reales del mes anterior ─────────────────────
+            real_mes = sub[
+                (sub['Fecha'] >= primer_dia_mes_ant) &
+                (sub['Fecha'] <= ultimo_dia_mes_ant)
+            ].copy().reset_index(drop=True)
+
+            if real_mes.empty:
+                st.warning(f"⚠️ {fundo}: sin datos reales del mes anterior.")
+                continue
+
+            # ── Predicción: usar forecast_hist del modelo principal ─
+            cache_entry   = forecasts_cache.get((fundo, variable), {})
+            forecast_hist = cache_entry.get('forecast_hist', pd.DataFrame())
+
+            if forecast_hist.empty:
+                st.warning(f"⚠️ {fundo}: sin forecast histórico disponible.")
+                continue
+
+            forecast_hist = forecast_hist.copy()
+            forecast_hist['ds'] = pd.to_datetime(
+                forecast_hist['ds']
+            ).dt.tz_localize(None).dt.normalize()
+
+            pred_mes = forecast_hist[
+                (forecast_hist['ds'] >= primer_dia_mes_ant) &
+                (forecast_hist['ds'] <= ultimo_dia_mes_ant)
+            ].copy().reset_index(drop=True)
+
+            if pred_mes.empty:
+                st.warning(f"⚠️ {fundo}: forecast histórico no cubre el mes anterior.")
+                continue
+
+            # ── Merge real vs predicho ─────────────────────────────
+            real_mes = real_mes.rename(columns={variable: 'Real'})
+            comparacion = real_mes[['Fecha', 'Real']].merge(
+                pred_mes[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].rename(
+                    columns={
+                        'ds'         : 'Fecha',
+                        'yhat'       : 'Pred',
+                        'yhat_lower' : 'Pred_Low',
+                        'yhat_upper' : 'Pred_High',
+                    }
+                ),
+                on='Fecha', how='inner'
+            )
+
+            if comparacion.empty:
+                st.warning(f"⚠️ {fundo}: no hay fechas coincidentes real vs predicho.")
+                continue
+
+            # ── Redondear ──────────────────────────────────────────
+            comparacion['Pred']      = comparacion['Pred'].round(1)
+            comparacion['Pred_Low']  = comparacion['Pred_Low'].round(1)
+            comparacion['Pred_High'] = comparacion['Pred_High'].round(1)
+            comparacion['Error_abs'] = (
+            comparacion['Real'] - comparacion['Pred']
+            ).abs().round(1)
+            comparacion['Error_signed'] = (
+                comparacion['Real'] - comparacion['Pred']
+            ).round(1)
+            comparacion['Error_pct'] = (
+                comparacion['Error_abs'] / comparacion['Real'].abs() * 100
+            ).round(2)
+
+            # ── KPIs ───────────────────────────────────────────────
+            # ── Métricas ───────────────────────────────────────────────
+            mae_mes            = comparacion['Error_abs'].abs().mean().round(2)
+            mbe_mes = comparacion['Error_signed'].mean().round(2)
+
+            mbe_pct            = comparacion['Error_pct'].mean().round(2)
+            error_pct_promedio = comparacion['Error_pct'].abs().mean().round(2)
+            dias_dentro_ic     = (
+                (comparacion['Real'] >= comparacion['Pred_Low']) &
+                (comparacion['Real'] <= comparacion['Pred_High'])
+            ).sum()
+            pct_dentro_ic = round(dias_dentro_ic / len(comparacion) * 100, 1)
+
+            # ── KPIs ───────────────────────────────────────────────────
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("📅 Días comparados", len(comparacion))
+            k2.metric("MAE promedio",       f"{mae_mes:.2f}°C",
+                    help="Error absoluto promedio — cuánto se equivoca sin importar dirección")
+            k3.metric("MBE (sesgo)",        f"{mbe_mes:+.2f}°C",
+                    delta="subestima" if mbe_mes > 0 else "sobreestima",
+                    delta_color="inverse" if mbe_mes > 0 else "normal",
+                    help="Error con signo — positivo=Prophet predice frío, negativo=Prophet predice caliente")
+            k4.metric("% Error promedio",   f"{error_pct_promedio:.1f}%",
+                    help="MAPE — error porcentual absoluto promedio")
+            k5.metric("Días dentro IC 95%", f"{dias_dentro_ic}/{len(comparacion)} ({pct_dentro_ic}%)")
+
+            # ── Gráfico real vs predicho ───────────────────────────
+            fig_val = go.Figure()
+
+            # Banda IC 95%
+            fig_val.add_trace(go.Scatter(
+                x=comparacion['Fecha'].tolist() + comparacion['Fecha'].tolist()[::-1],
+                y=comparacion['Pred_High'].tolist() + comparacion['Pred_Low'].tolist()[::-1],
+                fill='toself',
+                fillcolor='rgba(255,152,0,0.15)',
+                line=dict(color='rgba(0,0,0,0)'),
+                name='IC 95% Prophet',
+                hoverinfo='skip'
+            ))
+
+            # Línea predicha
+            fig_val.add_trace(go.Scatter(
+                x=comparacion['Fecha'],
+                y=comparacion['Pred'],
+                mode='lines+markers',
+                line=dict(color='#FF5722', width=2, dash='dash'),
+                marker=dict(size=6, color='#FF5722'),
+                name='Prophet (predicho)',
+                hovertemplate='%{x|%d/%b}<br>Pred: %{y:.1f}°C<extra></extra>'
+            ))
+
+            # Línea real
+            fig_val.add_trace(go.Scatter(
+                x=comparacion['Fecha'],
+                y=comparacion['Real'],
+                mode='lines+markers',
+                line=dict(color='#1A237E', width=2.5),
+                marker=dict(size=7, color='#1A237E'),
+                name='Real',
+                hovertemplate='%{x|%d/%b}<br>Real: %{y:.1f}°C<extra></extra>'
+            ))
+
+            # Barras % error (eje secundario)
+            fig_val.add_trace(go.Bar(
+                x=comparacion['Fecha'],
+                y=comparacion['Error_pct'],
+                name='% Error diario',
+                marker_color=[
+                    '#4CAF50' if v <= 2 else '#FF9800' if v <= 5 else '#F44336'
+                    for v in comparacion['Error_pct']
+                ],
+                opacity=0.6,
+                yaxis='y2',
+                hovertemplate='%{x|%d/%b}<br>Error: %{y:.1f}%<extra></extra>'
+            ))
+
+            fig_val.update_layout(
+                height=380,
+                title=dict(
+                    text=(
+                        f"<b>Real vs Prophet — {fundo} — {variable} — "
+                        f"{primer_dia_mes_ant.strftime('%B %Y')}</b>"
+                    ),
+                    font=dict(size=12), x=0.0
+                ),
+                xaxis=dict(tickformat='%d/%b', gridcolor='#CFD8DC'),
+                yaxis=dict(
+                    title=f'{variable} (°C)',
+                    ticksuffix='°C',
+                    gridcolor='#CFD8DC'
+                ),
+                yaxis2=dict(
+                    title='% Error',
+                    ticksuffix='%',
+                    overlaying='y',
+                    side='right',
+                    showgrid=False,
+                    range=[0, max(comparacion['Error_pct'].max() * 2, 10)]
+                ),
+                legend=dict(orientation='h', y=-0.15, x=0),
+                hovermode='x unified',
+                paper_bgcolor='#FFFFFF',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(family='Arial', size=9),
+                margin=dict(l=50, r=50, t=50, b=40),
+                barmode='overlay'
+            )
+
+            st.plotly_chart(fig_val, use_container_width=True)
+
+            # ── Tabla detalle ──────────────────────────────────────
+            tabla_show = comparacion[
+                ['Fecha', 'Real', 'Pred', 'Error_abs', 'Error_pct']
+            ].copy()
+            tabla_show['Fecha']     = tabla_show['Fecha'].dt.strftime('%d/%m/%Y')
+            tabla_show['Semáforo']  = comparacion['Error_pct'].apply(
+                lambda x: '🟢' if x <= 2 else '🟡' if x <= 5 else '🔴'
+            )
+            tabla_show['Real']      = tabla_show['Real'].map('{:.1f}'.format)
+            tabla_show['Pred']      = tabla_show['Pred'].map('{:.1f}'.format)
+            tabla_show['Error_abs'] = tabla_show['Error_abs'].map('{:.1f}'.format)
+            tabla_show['Error_pct'] = tabla_show['Error_pct'].map('{:.2f}'.format)
+
+            tabla_show.columns = [
+                'Fecha', f'{variable} Real', f'{variable} Pred',
+                'Error abs (°C)', 'Error (%)', 'Semáforo'
+            ]
+            
+                        # ── Leyenda semáforo ───────────────────────────────────────
+            st.markdown("""
+            <div style="display:flex; gap:20px; font-size:0.78rem; color:#546E7A; margin-bottom:6px;">
+                <span>🟢 Error ≤ 2% — Excelente</span>
+                <span>🟡 Error ≤ 5% — Aceptable</span>
+                <span>🔴 Error > 5% — Revisar</span>
+                <span style="color:#888; font-style:italic">| (+) Prophet subestimó &nbsp; (−) Prophet sobreestimó</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.dataframe(
+                tabla_show, use_container_width=True,
+                hide_index=True, height=280
+            )
 
 def generar_range_plot(variable, historico_df, prediccion_df, fundo_name, row, fig):
     """Agrega Range Plot con Error Bars (barras Tmin-Tmax)."""
@@ -631,7 +1202,7 @@ def generar_range_plot(variable, historico_df, prediccion_df, fundo_name, row, f
                 thickness=2,
                 width=3
             ),
-            name=f'Prophet +{len(fechas_pred)}d',
+            name=f'Predicción +{len(fechas_pred)}d',
             showlegend=True,
             legendgroup=fundo_name,
             hovertemplate='%{x|%d/%b/%Y}<br>Pred: %{y:.1f}°C<extra>Prophet</extra>'
@@ -644,12 +1215,12 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
     n = len(fundos)
     
     if variable == 'Tmax':
-        fig_bg, banda_color, clim_color, color_real = (
-            BG_TMAX, BANDA_TMAX, CLIM_TMAX, REAL_TMAX_COLOR
+        fig_bg, banda_color, clim_color, color_real, pred_color = (
+            BG_TMAX, BANDA_TMAX, CLIM_TMAX, REAL_TMAX_COLOR, PRED_COLOR_TMAX
         )
     else:
-        fig_bg, banda_color, clim_color, color_real = (
-            BG_TMIN, BANDA_TMIN, CLIM_TMIN, REAL_TMIN_COLOR
+        fig_bg, banda_color, clim_color, color_real, pred_color = (
+            BG_TMIN, BANDA_TMIN, CLIM_TMIN, REAL_TMIN_COLOR, PRED_COLOR_TMIN
         )
     
     fig = make_subplots(
@@ -661,7 +1232,9 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
     
     rows_export, rows_pred_export = [], []
     anio_actual = pd.Timestamp.today().year
-    fecha_ini_anio = pd.Timestamp(year=anio_actual, month=1, day=1)
+    fecha_ini_anio = pd.Timestamp(year=anio_actual - 1, month=1, day=1)
+    
+    import calendar
     
     for i, fundo in enumerate(fundos):
         row = i + 1
@@ -670,21 +1243,40 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
         if sub_full.empty:
             continue
         
-        sub = sub_full[sub_full['Fecha'] >= fecha_ini_anio].copy().reset_index(drop=True)
-        if sub.empty:
+        sub_full = sub_full[sub_full['Fecha'] >= fecha_ini_anio].copy().reset_index(drop=True)
+        if sub_full.empty:
             st.warning(f"⚠️ Sin datos en {anio_actual} para **{fundo}**.")
+            continue
+
+        # ── Calcular fecha_fin_norm = último día del mes ANTERIOR al mes del último dato
+        fecha_corte_real = pd.to_datetime(sub_full['Fecha'].max()).tz_localize(None).normalize()
+        primer_dia_mes_actual = fecha_corte_real.replace(day=1)
+        # fecha_fin_norm = fin del mes ANTERIOR (para recortar línea real en el gráfico)
+        fecha_fin_norm = primer_dia_mes_actual - pd.Timedelta(days=1)
+
+        # ── Último día del mes actual (para zoom y pred)
+        ultimo_dia_mes_actual = pd.Timestamp(
+            year=primer_dia_mes_actual.year,
+            month=primer_dia_mes_actual.month,
+            day=calendar.monthrange(primer_dia_mes_actual.year, primer_dia_mes_actual.month)[1]
+        )
+
+        # ── Recortar sub a datos reales hasta fecha_fin_norm
+        sub = sub_full[sub_full['Fecha'] <= fecha_fin_norm].copy().reset_index(drop=True)
+        if sub.empty:
+            st.warning(f"⚠️ Sin datos hasta fin de mes anterior para **{fundo}**.")
             continue
         
         empresa = sub['Empresa'].iloc[0]
-        fecha_fin = sub['Fecha'].max()
-        fecha_fin_norm = pd.to_datetime(fecha_fin).tz_localize(None).normalize()
         
-        zoom_ini = fecha_fin_norm - pd.Timedelta(days=dias_vista)
-        zoom_fin = fecha_fin_norm + pd.Timedelta(days=dias_pred + 5)
+        zoom_ini = sub['Fecha'].min()
+        zoom_fin = ultimo_dia_mes_actual + pd.Timedelta(days=2)
         
         # Splines con cache
-        fecha_ini_clima = pd.Timestamp(year=anio_actual, month=1, day=1)
-        fecha_fin_clima = pd.Timestamp(year=anio_actual, month=12, day=31)
+        fecha_ini_clima = sub['Fecha'].min()
+        if hasattr(fecha_ini_clima, 'tz_localize'):
+            fecha_ini_clima = pd.Timestamp(fecha_ini_clima).tz_localize(None).normalize()
+        fecha_fin_clima = pd.Timestamp(zoom_fin)
         
         clim_media = spline_diario_cached(
             fecha_ini_clima.strftime('%Y-%m-%d'),
@@ -704,15 +1296,9 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
         
         # Merge eficiente
         hist_df = sub[['Empresa', 'Fundo', 'Fecha', variable, f'{variable}_smooth']].copy()
-        hist_df = hist_df.merge(
-            clim_media.rename(columns={'Valor': 'Clim_MEDIA'}), on='Fecha', how='left'
-        )
-        hist_df = hist_df.merge(
-            clim_q1.rename(columns={'Valor': 'Clim_Q1'}), on='Fecha', how='left'
-        )
-        hist_df = hist_df.merge(
-            clim_q3.rename(columns={'Valor': 'Clim_Q3'}), on='Fecha', how='left'
-        )
+        hist_df = hist_df.merge(clim_media.rename(columns={'Valor': 'Clim_MEDIA'}), on='Fecha', how='left')
+        hist_df = hist_df.merge(clim_q1.rename(columns={'Valor': 'Clim_Q1'}), on='Fecha', how='left')
+        hist_df = hist_df.merge(clim_q3.rename(columns={'Valor': 'Clim_Q3'}), on='Fecha', how='left')
         hist_df['Variable'] = variable
         rows_export.append(hist_df)
         
@@ -725,13 +1311,40 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
         if not forecast.empty:
             forecast = forecast.copy()
             forecast['ds'] = pd.to_datetime(forecast['ds']).dt.tz_localize(None).dt.normalize()
-            pred_fc = forecast.reset_index(drop=True)
+
+            # Solo predicción: después de fecha_fin_norm hasta fin del mes actual
+            pred_fc = forecast[
+                (forecast['ds'] >= primer_dia_mes_actual) &
+                (forecast['ds'] <= ultimo_dia_mes_actual)
+            ].reset_index(drop=True)
         else:
             pred_fc = pd.DataFrame()
-        
+
+        if not pred_fc.empty and len(sub) >= 14:
+            ventana = min(21, len(sub))
+            sub_reciente = sub.tail(ventana).copy().reset_index(drop=True)
+            residuos = (sub_reciente[variable] - sub_reciente[f'{variable}_smooth']).values
+
+            from scipy.ndimage import gaussian_filter1d
+            residuos_suaves = gaussian_filter1d(residuos, sigma=0.8)
+
+            n_pred = len(pred_fc)
+            n_res = len(residuos_suaves)
+            indices = [i % n_res for i in range(n_pred)]
+            patron = residuos_suaves[indices]
+
+            std_hist = residuos_suaves.std()
+            std_pred = pred_fc['yhat'].std()
+            factor = min(1.0, std_hist / (std_pred + 1e-6)) * 0.6
+
+            pred_fc = pred_fc.copy()
+            pred_fc['yhat']       = (pred_fc['yhat']       + patron * factor).round(2)
+            pred_fc['yhat_lower'] = (pred_fc['yhat_lower'] + patron * factor).round(2)
+            pred_fc['yhat_upper'] = (pred_fc['yhat_upper'] + patron * factor).round(2)
+
         lg = fundo
         
-        # Agregar trazas (igual que antes, pero sin detalles extras)
+        # Trazas climatología
         fig.add_trace(go.Scatter(
             x=clim_q3['Fecha'], y=clim_q3['Valor'],
             mode='lines', line=dict(width=0),
@@ -754,19 +1367,15 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
             hovertemplate='%{x|%d/%b}<br>Clim: %{y:.1f}°C<extra></extra>'
         ), row=row, col=1)
         
-        # MOSTRAR DATOS REALES Y PREDICCIÓN EN LÍNEA O RANGE PLOT
+        # Datos reales
         if tipo_viz == 'candlestick':
-            # Preparar datos para range plot
             if not pred_fc.empty:
                 if dias_pred_mostrar is not None and dias_pred_mostrar < len(pred_fc):
                     pred_fc = pred_fc.iloc[:dias_pred_mostrar].copy()
-                
                 generar_range_plot(variable, sub, pred_fc, fundo, row, fig)
             else:
-                # Solo histórico en range plot
                 generar_range_plot(variable, sub, pd.DataFrame(), fundo, row, fig)
         else:
-            # MODO LÍNEA (original)
             fig.add_trace(go.Scatter(
                 x=sub['Fecha'], y=sub[f'{variable}_smooth'],
                 mode='lines+markers',
@@ -777,7 +1386,7 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
                 name=f'{variable} REAL',
                 hovertemplate='%{x|%d/%b/%Y}<br>' + f'{variable}: %{{y:.1f}}°C<br>ET: %{{customdata:.1f}}<extra>{fundo}</extra>'
             ), row=row, col=1)
-        
+                    
         ult = sub.iloc[-1]
         ult_real_val = ult[variable]
         fig.add_annotation(
@@ -788,70 +1397,68 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
             row=row, col=1
         )
         
+        # Línea vertical divisoria real/predicción
         fig.add_vline(
             x=fecha_fin_norm,
             line=dict(color='#546E7A', width=1.2, dash='dot'),
             row=row, col=1
         )
         
-        # Predicciones (si es modo línea)
+        # Predicciones modo línea
         if tipo_viz == 'linea' and not pred_fc.empty:
-            # CORTAR predicción si se especifica dias_pred_mostrar
             if dias_pred_mostrar is not None and dias_pred_mostrar < len(pred_fc):
                 pred_fc = pred_fc.iloc[:dias_pred_mostrar].copy()
             
             ult_smooth = float(ult[f'{variable}_smooth'])
             
+            # Conector
             fig.add_trace(go.Scatter(
-                x=[fecha_fin_norm, pred_fc['ds'].iloc[0]],
+                x=[ult['Fecha'], pred_fc['ds'].iloc[0]],
                 y=[ult_smooth, float(pred_fc['yhat'].iloc[0])],
                 mode='lines',
-                line=dict(color=PRED_COLOR, width=2.0, dash='dot'),
+                line=dict(color=pred_color, width=2.0, dash='dash'),
                 showlegend=False, hoverinfo='skip', legendgroup=lg
             ), row=row, col=1)
             
+            # Banda IC 95%
             fig.add_trace(go.Scatter(
-                x=pred_fc['ds'].tolist(),
-                y=pred_fc['yhat_lower'].tolist(),
-                mode='lines',
-                line=dict(width=0, color='rgba(0,0,0,0)'),
-                showlegend=False, hoverinfo='skip',
-                legendgroup=lg, name='_lower'
+                x=pred_fc['ds'].tolist(), y=pred_fc['yhat_lower'].tolist(),
+                mode='lines', line=dict(width=0, color='rgba(0,0,0,0)'),
+                showlegend=False, hoverinfo='skip', legendgroup=lg, name='_lower'
             ), row=row, col=1)
             fig.add_trace(go.Scatter(
-                x=pred_fc['ds'].tolist(),
-                y=pred_fc['yhat_upper'].tolist(),
-                mode='lines',
-                line=dict(width=0, color='rgba(0,0,0,0)'),
-                fill='tonexty',
-                fillcolor=_hex_to_rgba(PRED_COLOR, 0.20),
-                showlegend=(i == 0), name='Intervalo 95% Prophet',
+                x=pred_fc['ds'].tolist(), y=pred_fc['yhat_upper'].tolist(),
+                mode='lines', line=dict(width=0, color='rgba(0,0,0,0)'),
+                fill='tonexty', fillcolor=_hex_to_rgba(pred_color, 0.20),
+                showlegend=(i == 0), name='IC 95%',
                 legendgroup=lg, hoverinfo='skip'
             ), row=row, col=1)
             
+            # Línea predicción
             fig.add_trace(go.Scatter(
-                x=pred_fc['ds'].tolist(),
-                y=pred_fc['yhat'].tolist(),
+                x=pred_fc['ds'].tolist(), y=pred_fc['yhat'].tolist(),
                 mode='lines',
-                line=dict(color=PRED_COLOR, width=3.5),
+                line=dict(color=pred_color, width=3.5, dash='dash'),
                 showlegend=(i == 0), legendgroup=lg,
-                name=f'Prophet +{dias_pred}d',
-                hovertemplate='%{x|%d/%b/%Y}<br>Pred: %{y:.1f}°C<extra>Prophet</extra>'
+                name=f'Predicción mes siguiente',
+                hovertemplate='%{x|%d/%b/%Y}<br>Pred: %{y:.1f}°C<extra>Predicción</extra>'
             ), row=row, col=1)
             
+            # Anotación último valor predicho
             ult_pred_dt = pred_fc['ds'].iloc[-1]
             ult_pred_val = float(pred_fc['yhat'].iloc[-1])
             fig.add_annotation(
                 x=ult_pred_dt, y=ult_pred_val,
                 text=f"<b>{ult_pred_val:.1f}°C</b>",
-                showarrow=True, arrowhead=2, arrowcolor=PRED_COLOR, arrowwidth=1.0,
-                ax=-28, ay=-18, font=dict(size=9, color=PRED_COLOR),
+                showarrow=True, arrowhead=2, arrowcolor=pred_color, arrowwidth=1.0,
+                ax=-28, ay=-18, font=dict(size=9, color=pred_color),
                 row=row, col=1
             )
         
-        # Título SIMPLIFICADO (sin fechas)
+        # Título
         fig.layout.annotations[i].update(
-            text=f"<b>{empresa}  —  {fundo}  —  {variable}</b>",
+            text=f"<b>{empresa}  —  {fundo}  —  {variable}</b>  "
+                 f"<span style='font-size:9px;color:#546E7A'>| Real hasta {fecha_fin_norm.strftime('%d/%b/%Y')} | Pred: {primer_dia_mes_actual.strftime('%b %Y')}</span>",
             font=dict(size=11, color='#1A1A1A'),
             x=0.0, xanchor='left'
         )
@@ -862,7 +1469,7 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
             tickformat='%d/%b', ticklabelmode='period',
             gridcolor=GRID_COLOR, gridwidth=0.5,
             showgrid=True, zeroline=False,
-            autorange=False,
+            autorange=False, fixedrange=False,
             rangeslider=dict(visible=False)
         )
         yk = 'yaxis' if row == 1 else f'yaxis{row}'
@@ -870,9 +1477,7 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
             ticksuffix='°C', gridcolor=GRID_COLOR, gridwidth=0.5,
             showgrid=True, zeroline=False,
         )
-    
 
-    
     fig.update_layout(
         height=320 * n,
         paper_bgcolor=fig_bg,
@@ -891,16 +1496,6 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
         ),
         hovermode='x unified'
     )
-    fig.add_annotation(
-        text=(
-            "Fuente: SENAMHI Normales Climatológicas 1991-2020 | "
-            "Predicción: Prophet"
-        ),
-        xref='paper', yref='paper', x=0, y=-0.12,
-        showarrow=False,
-        font=dict(size=7, color='#546E7A', style='italic'),
-        xanchor='left'
-    )
     
     df_hist = pd.concat(rows_export, ignore_index=True) if rows_export else pd.DataFrame()
     df_pred = pd.concat(rows_pred_export, ignore_index=True) if rows_pred_export else pd.DataFrame()
@@ -910,7 +1505,6 @@ def generar_figura(variable, dia, media_mensual, q1_mensual, q3_mensual,
 # ══════════════════════════════════════════════════════════════
 # EXPORTAR EXCEL (igual que antes)
 # ══════════════════════════════════════════════════════════════
-
 def _generar_pred_horaria(df_pred: pd.DataFrame) -> pd.DataFrame:
     if df_pred.empty:
         return pd.DataFrame()
@@ -1158,11 +1752,9 @@ def exportar_excel(df_hist: pd.DataFrame, df_pred: pd.DataFrame) -> bytes:
     wb.save(out)
     out.seek(0)
     return out.read()
-
 # ══════════════════════════════════════════════════════════════
 # MAIN APP
 # ══════════════════════════════════════════════════════════════
-
 @st.cache_data(show_spinner=False)
 def _leer_normales_desde_disco(path: str):
     with open(path, 'rb') as f:
@@ -1347,14 +1939,14 @@ mostrar_tmin = variable_sel in ['Ambas', 'Solo Tmin']
 dias_pred_mitad = max(7, dias_pred_ui // 2)  # Mínimo 7 días
 
 if mostrar_tmax and mostrar_tmin:
-    tab_tmax, tab_tmin, tab_datos = st.tabs(
-        ["🔴 Temperatura Máxima", "🔵 Temperatura Mínima", "📋 Datos"]
+    tab_tmax, tab_tmin, tab_et, tab_datos = st.tabs(
+        ["🔴 Temperatura Máxima", "🔵 Temperatura Mínima", "💧 ET", "📋 Datos"]
     )
 elif mostrar_tmax:
-    tab_tmax, tab_datos = st.tabs(["🔴 Temperatura Máxima", "📋 Datos"])
+    tab_tmax, tab_et, tab_datos = st.tabs(["🔴 Temperatura Máxima", "💧 ET", "📋 Datos"])
     tab_tmin = None
 else:
-    tab_tmin, tab_datos = st.tabs(["🔵 Temperatura Mínima", "📋 Datos"])
+    tab_tmin, tab_et, tab_datos = st.tabs(["🔵 Temperatura Mínima", "💧 ET", "📋 Datos"])
     tab_tmax = None
 
 if mostrar_tmax and tab_tmax is not None:
@@ -1381,6 +1973,8 @@ if mostrar_tmax and tab_tmax is not None:
                 'Tmax', dia, MEDIA_TMAX, Q1_TMAX, Q3_TMAX, dias_pred_ui, forecasts_cache, dias_vista_num, dias_pred_mostrar_num, tipo_viz_tmax_lower
             )
         st.plotly_chart(fig_tmax, use_container_width=True)
+        generar_seccion_validacion('Tmax', dia, forecasts_cache, dias_pred_ui)
+
 else:
     df_tmax_hist = pd.DataFrame()
     df_tmax_pred = pd.DataFrame()
@@ -1403,13 +1997,16 @@ if mostrar_tmin and tab_tmin is not None:
             dias_pred_mostrar_num = int(dias_pred_mostrar.replace('d', ''))
         
         tipo_viz_tmin_lower = 'linea'
-        
+    
         with st.spinner("Generando Tmin..."):
             fig_tmin, df_tmin_hist, df_tmin_pred = generar_figura(
                 'Tmin', dia, MEDIA_TMIN, Q1_TMIN, Q3_TMIN, dias_pred_ui, forecasts_cache, dias_vista_num, dias_pred_mostrar_num, tipo_viz_tmin_lower
             )
         st.plotly_chart(fig_tmin, use_container_width=True)
-else:
+        generar_seccion_validacion('Tmin', dia, forecasts_cache, dias_pred_ui)
+    with tab_et:
+        generar_tab_et(dia, forecasts_cache, dias_pred_ui)
+else:   
     df_tmin_hist = pd.DataFrame()
     df_tmin_pred = pd.DataFrame()
 
