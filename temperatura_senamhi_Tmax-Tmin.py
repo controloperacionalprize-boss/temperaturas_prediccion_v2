@@ -297,7 +297,52 @@ def spline_diario_cached(fecha_inicio_str: str, fecha_fin_str: str,
 # ══════════════════════════════════════════════════════════════
 # CARGAR NORMALES (igual a antes)
 # ══════════════════════════════════════════════════════════════
-
+@st.cache_data(show_spinner=False)
+def cargar_catalogo_normales(_file_bytes, hoja='TMAX'):
+    """
+    Lee todos los departamentos y distritos disponibles en el archivo
+    de normales SENAMHI. Retorna un dict {departamento: [distritos]}.
+    """
+    raw = pd.read_excel(io.BytesIO(_file_bytes), sheet_name=hoja, header=None)
+ 
+    # Detectar fila de encabezado
+    header_row = None
+    for idx, row in raw.iterrows():
+        vals = [_normalizar(str(v)) for v in row.values if pd.notna(v)]
+        if 'DISTRITO' in vals:
+            header_row = idx
+            break
+ 
+    if header_row is None:
+        return {}
+ 
+    df = pd.read_excel(io.BytesIO(_file_bytes), sheet_name=hoja, header=header_row)
+    df.columns = [str(c).strip() for c in df.columns]
+ 
+    # Buscar columnas departamento y distrito
+    col_depto    = next((c for c in df.columns if _normalizar(c) == 'DEPARTAMENTO'), None)
+    col_distrito = next((c for c in df.columns if _normalizar(c) == 'DISTRITO'), None)
+ 
+    if col_depto is None or col_distrito is None:
+        return {}
+ 
+    # Limpiar y construir catálogo
+    df['_depto']    = df[col_depto].astype(str).apply(_normalizar)
+    df['_distrito'] = df[col_distrito].astype(str).apply(_normalizar)
+ 
+    # Eliminar filas vacías o nan
+    df = df[
+        (df['_depto'] != 'NAN') & (df['_depto'] != '') &
+        (df['_distrito'] != 'NAN') & (df['_distrito'] != '')
+    ].copy()
+ 
+    catalogo = {}
+    for depto, grupo in df.groupby('_depto'):
+        distritos = sorted(grupo['_distrito'].unique().tolist())
+        catalogo[depto] = distritos
+ 
+    return catalogo  # {DEPARTAMENTO: [DISTRITO1, DISTRITO2, ...]}
+ 
 @st.cache_data(show_spinner=False)
 def cargar_normales(_file_bytes, hoja):
     raw = pd.read_excel(io.BytesIO(_file_bytes), sheet_name=hoja, header=None)
@@ -910,234 +955,378 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui):
             )
 
 
+
 def generar_seccion_validacion(variable, dia, forecasts_cache, dias_pred_ui):
-    """
-    Muestra sección expandible con comparación real vs Prophet
-    para el mes anterior completo, por fundo.
-    """
     import calendar
-
+ 
     fundos = dia['Fundo'].unique().tolist()
-
+ 
     with st.expander(f"📊 Validación Prophet — {variable} (mes anterior)", expanded=False):
-
+ 
+        datos_boxplot = []
+ 
         for fundo in fundos:
             sub = dia[dia['Fundo'] == fundo].copy().reset_index(drop=True)
             if sub.empty:
                 continue
-
-            # ── Determinar mes anterior ────────────────────────────
-            fecha_max = pd.to_datetime(sub['Fecha'].max()).normalize()
-            primer_dia_mes_actual = fecha_max.replace(day=1)
-            ultimo_dia_mes_ant = primer_dia_mes_actual - pd.Timedelta(days=1)
-            primer_dia_mes_ant = ultimo_dia_mes_ant.replace(day=1)
-
-            # ── Datos reales del mes anterior ─────────────────────
+ 
+            fecha_max         = pd.to_datetime(sub['Fecha'].max()).normalize()
+            primer_dia_actual = fecha_max.replace(day=1)
+            ultimo_dia_ant    = primer_dia_actual - pd.Timedelta(days=1)
+            primer_dia_ant    = ultimo_dia_ant.replace(day=1)
+ 
             real_mes = sub[
-                (sub['Fecha'] >= primer_dia_mes_ant) &
-                (sub['Fecha'] <= ultimo_dia_mes_ant)
+                (sub['Fecha'] >= primer_dia_ant) &
+                (sub['Fecha'] <= ultimo_dia_ant)
             ].copy().reset_index(drop=True)
-
+ 
             if real_mes.empty:
                 st.warning(f"⚠️ {fundo}: sin datos reales del mes anterior.")
                 continue
-
-            # ── Predicción: usar forecast_hist del modelo principal ─
+ 
             cache_entry   = forecasts_cache.get((fundo, variable), {})
             forecast_hist = cache_entry.get('forecast_hist', pd.DataFrame())
-
+ 
             if forecast_hist.empty:
                 st.warning(f"⚠️ {fundo}: sin forecast histórico disponible.")
                 continue
-
+ 
             forecast_hist = forecast_hist.copy()
             forecast_hist['ds'] = pd.to_datetime(
                 forecast_hist['ds']
             ).dt.tz_localize(None).dt.normalize()
-
+ 
             pred_mes = forecast_hist[
-                (forecast_hist['ds'] >= primer_dia_mes_ant) &
-                (forecast_hist['ds'] <= ultimo_dia_mes_ant)
+                (forecast_hist['ds'] >= primer_dia_ant) &
+                (forecast_hist['ds'] <= ultimo_dia_ant)
             ].copy().reset_index(drop=True)
-
+ 
             if pred_mes.empty:
                 st.warning(f"⚠️ {fundo}: forecast histórico no cubre el mes anterior.")
                 continue
-
-            # ── Merge real vs predicho ─────────────────────────────
+ 
             real_mes = real_mes.rename(columns={variable: 'Real'})
             comparacion = real_mes[['Fecha', 'Real']].merge(
-                pred_mes[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].rename(
-                    columns={
-                        'ds'         : 'Fecha',
-                        'yhat'       : 'Pred',
-                        'yhat_lower' : 'Pred_Low',
-                        'yhat_upper' : 'Pred_High',
-                    }
-                ),
+                pred_mes[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].rename(columns={
+                    'ds'         : 'Fecha',
+                    'yhat'       : 'Pred',
+                    'yhat_lower' : 'Pred_Low',
+                    'yhat_upper' : 'Pred_High',
+                }),
                 on='Fecha', how='inner'
             )
-
+ 
             if comparacion.empty:
                 st.warning(f"⚠️ {fundo}: no hay fechas coincidentes real vs predicho.")
                 continue
-
-            # ── Redondear ──────────────────────────────────────────
-            comparacion['Pred']      = comparacion['Pred'].round(1)
-            comparacion['Pred_Low']  = comparacion['Pred_Low'].round(1)
-            comparacion['Pred_High'] = comparacion['Pred_High'].round(1)
-            comparacion['Error_abs'] = (
-            comparacion['Real'] - comparacion['Pred']
-            ).abs().round(1)
-            comparacion['Error_signed'] = (
-                comparacion['Real'] - comparacion['Pred']
-            ).round(1)
-            comparacion['Error_pct'] = (
+ 
+            comparacion['Pred']         = comparacion['Pred'].round(1)
+            comparacion['Pred_Low']     = comparacion['Pred_Low'].round(1)
+            comparacion['Pred_High']    = comparacion['Pred_High'].round(1)
+            comparacion['Error_abs']    = (comparacion['Real'] - comparacion['Pred']).abs().round(1)
+            comparacion['Error_signed'] = (comparacion['Real'] - comparacion['Pred']).round(1)
+            comparacion['Error_pct']    = (
                 comparacion['Error_abs'] / comparacion['Real'].abs() * 100
             ).round(2)
-
-            # ── KPIs ───────────────────────────────────────────────
-            # ── Métricas ───────────────────────────────────────────────
-            mae_mes            = comparacion['Error_abs'].abs().mean().round(2)
-            mbe_mes = comparacion['Error_signed'].mean().round(2)
-
-            mbe_pct            = comparacion['Error_pct'].mean().round(2)
-            error_pct_promedio = comparacion['Error_pct'].abs().mean().round(2)
+            comparacion['Error_signed_pct'] = (
+                comparacion['Error_signed'] / comparacion['Real'].abs() * 100
+            ).round(2)
+ 
+            mae_mes            = comparacion['Error_abs'].mean().round(2)
+            mbe_mes            = comparacion['Error_signed'].mean().round(2)
+            error_pct_promedio = comparacion['Error_pct'].mean().round(2)
+            mbe_pct            = comparacion['Error_signed_pct'].mean().round(2)
             dias_dentro_ic     = (
                 (comparacion['Real'] >= comparacion['Pred_Low']) &
                 (comparacion['Real'] <= comparacion['Pred_High'])
             ).sum()
             pct_dentro_ic = round(dias_dentro_ic / len(comparacion) * 100, 1)
-
-            # ── KPIs ───────────────────────────────────────────────────
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("📅 Días comparados", len(comparacion))
-            k2.metric("MAE promedio",       f"{mae_mes:.2f}°C",
-                    help="Error absoluto promedio — cuánto se equivoca sin importar dirección")
+ 
+            # ← SIN abs() para ver signo
+            error_mensual_pct = round(
+                (comparacion['Real'].sum() - comparacion['Pred'].sum())
+                / comparacion['Real'].sum() * 100, 2
+            )
+            precision_mensual = round(100 - abs(error_mensual_pct), 1)
+ 
+            # ← Error_signed_pct para ver negativos en box plot
+            for _, r in comparacion.iterrows():
+                datos_boxplot.append({
+                    'Fundo'  : fundo,
+                    'Error'  : r['Error_signed'],   # °C con signo
+                })
+ 
+            st.markdown(f"##### {fundo} — {primer_dia_ant.strftime('%B %Y')}")
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("📅 Días",           len(comparacion))
+            k2.metric("MAE",               f"{mae_mes:.2f}°C")
             k3.metric("MBE (sesgo)",        f"{mbe_mes:+.2f}°C",
-                    delta="subestima" if mbe_mes > 0 else "sobreestima",
-                    delta_color="inverse" if mbe_mes > 0 else "normal",
-                    help="Error con signo — positivo=Prophet predice frío, negativo=Prophet predice caliente")
-            k4.metric("% Error promedio",   f"{error_pct_promedio:.1f}%",
-                    help="MAPE — error porcentual absoluto promedio")
-            k5.metric("Días dentro IC 95%", f"{dias_dentro_ic}/{len(comparacion)} ({pct_dentro_ic}%)")
-
-            # ── Gráfico real vs predicho ───────────────────────────
+                      delta="subestima" if mbe_mes > 0 else "sobreestima",
+                      delta_color="inverse" if mbe_mes > 0 else "normal")
+            k4.metric("MAPE",              f"{error_pct_promedio:.1f}%")
+            k5.metric(
+                "Precisión mensual",
+                f"{precision_mensual:.1f}%",
+                delta=f"Error: {error_mensual_pct:+.1f}%",
+                delta_color="inverse" if error_mensual_pct > 0 else "normal",
+                help="+ = Prophet subestima (Real > Pred) · - = Prophet sobreestima (Real < Pred)"
+            )
+            k6.metric("Días en IC 95%",    f"{dias_dentro_ic}/{len(comparacion)} ({pct_dentro_ic}%)")
+ 
             fig_val = go.Figure()
 
-            # Banda IC 95%
-            fig_val.add_trace(go.Scatter(
-                x=comparacion['Fecha'].tolist() + comparacion['Fecha'].tolist()[::-1],
-                y=comparacion['Pred_High'].tolist() + comparacion['Pred_Low'].tolist()[::-1],
-                fill='toself',
-                fillcolor='rgba(255,152,0,0.15)',
-                line=dict(color='rgba(0,0,0,0)'),
-                name='IC 95% Prophet',
-                hoverinfo='skip'
-            ))
+            # Banda de referencia ±1°C (excelente)
+            fig_val.add_hrect(
+                y0=-1, y1=1,
+                fillcolor='rgba(76, 175, 80, 0.10)',
+                line_width=0,
+                annotation_text="±1°C Excelente",
+                annotation_position="top right",
+                annotation_font=dict(size=8, color='#4CAF50')
+            )
 
-            # Línea predicha
+            # Línea cero
+            fig_val.add_hline(
+                y=0,
+                line=dict(color='#546E7A', width=1.5, dash='solid'),
+            )
+
+            # Área coloreada bajo/sobre cero
+            for j in range(len(comparacion) - 1):
+                x0 = comparacion['Fecha'].iloc[j]
+                x1 = comparacion['Fecha'].iloc[j + 1]
+                e0 = comparacion['Error_signed'].iloc[j]
+                e1 = comparacion['Error_signed'].iloc[j + 1]
+
+                # ── Si ambos del mismo lado: área simple ──
+                if e0 >= 0 and e1 >= 0:
+                    fig_val.add_trace(go.Scatter(
+                        x=[x0, x1, x1, x0], y=[e0, e1, 0, 0],
+                        fill='toself', fillcolor='rgba(76,175,80,0.30)',
+                        line=dict(color='rgba(0,0,0,0)'),
+                        showlegend=False, hoverinfo='skip'
+                    ))
+                elif e0 < 0 and e1 < 0:
+                    fig_val.add_trace(go.Scatter(
+                        x=[x0, x1, x1, x0], y=[e0, e1, 0, 0],
+                        fill='toself', fillcolor='rgba(244,67,54,0.30)',
+                        line=dict(color='rgba(0,0,0,0)'),
+                        showlegend=False, hoverinfo='skip'
+                    ))
+                else:
+                    # ── Cruce por cero: calcular punto de intersección ──
+                    # x_cruce = x0 + (x1-x0) * |e0| / (|e0| + |e1|)
+                    frac = abs(e0) / (abs(e0) + abs(e1))
+                    rango = (x1 - x0).total_seconds()
+                    x_cross = x0 + pd.Timedelta(seconds=rango * frac)
+
+                    # Segmento izquierdo
+                    color_izq = 'rgba(76,175,80,0.30)' if e0 >= 0 else 'rgba(244,67,54,0.30)'
+                    fig_val.add_trace(go.Scatter(
+                        x=[x0, x_cross, x_cross, x0], y=[e0, 0, 0, 0],
+                        fill='toself', fillcolor=color_izq,
+                        line=dict(color='rgba(0,0,0,0)'),
+                        showlegend=False, hoverinfo='skip'
+                    ))
+
+                    # Segmento derecho
+                    color_der = 'rgba(76,175,80,0.30)' if e1 >= 0 else 'rgba(244,67,54,0.30)'
+                    fig_val.add_trace(go.Scatter(
+                        x=[x_cross, x1, x1, x_cross], y=[0, e1, 0, 0],
+                        fill='toself', fillcolor=color_der,
+                        line=dict(color='rgba(0,0,0,0)'),
+                        showlegend=False, hoverinfo='skip'
+                    ))
+            # Línea de diferencia
             fig_val.add_trace(go.Scatter(
                 x=comparacion['Fecha'],
-                y=comparacion['Pred'],
-                mode='lines+markers',
-                line=dict(color='#FF5722', width=2, dash='dash'),
-                marker=dict(size=6, color='#FF5722'),
-                name='Prophet (predicho)',
-                hovertemplate='%{x|%d/%b}<br>Pred: %{y:.1f}°C<extra></extra>'
-            ))
-
-            # Línea real
-            fig_val.add_trace(go.Scatter(
-                x=comparacion['Fecha'],
-                y=comparacion['Real'],
+                y=comparacion['Error_signed'],
                 mode='lines+markers',
                 line=dict(color='#1A237E', width=2.5),
-                marker=dict(size=7, color='#1A237E'),
-                name='Real',
-                hovertemplate='%{x|%d/%b}<br>Real: %{y:.1f}°C<extra></extra>'
+                marker=dict(
+                    size=7,
+                    color=comparacion['Error_signed'].apply(
+                        lambda e: '#4CAF50' if e >= 0 else '#F44336'  # verde si positivo, rojo si negativo
+                    ),
+                    line=dict(color='white', width=1)
+                ),
+                name='Error (Real − Pred)',
+                hovertemplate='%{x|%d/%b}<br>Error: %{y:+.2f}°C<extra></extra>'
             ))
 
-            # Barras % error (eje secundario)
-            fig_val.add_trace(go.Bar(
-                x=comparacion['Fecha'],
-                y=comparacion['Error_pct'],
-                name='% Error diario',
-                marker_color=[
-                    '#4CAF50' if v <= 2 else '#FF9800' if v <= 5 else '#F44336'
-                    for v in comparacion['Error_pct']
-                ],
-                opacity=0.6,
-                yaxis='y2',
-                hovertemplate='%{x|%d/%b}<br>Error: %{y:.1f}%<extra></extra>'
-            ))
+            # Anotación MBE / MAE
+            fig_val.add_annotation(
+                x=comparacion['Fecha'].iloc[len(comparacion) // 2],
+                y=2.8,
+                text=(
+                    f"<b>MBE: {mbe_mes:+.2f}°C</b><br>"
+                    f"{'🔺 subestima' if mbe_mes > 0 else '🔻 sobreestima'}<br>"
+                    f"MAE: {mae_mes:.2f}°C"
+                ),
+                showarrow=False,
+                bgcolor='rgba(255,255,255,0.85)',
+                bordercolor='#546E7A',
+                borderwidth=1,
+                font=dict(size=10, color='#1A1A1A'),
+                align='center'
+            )
+
+            _y_min = -3.5
+            _y_max = 3.5
 
             fig_val.update_layout(
-                height=380,
+                height=350,
                 title=dict(
                     text=(
-                        f"<b>Real vs Prophet — {fundo} — {variable} — "
-                        f"{primer_dia_mes_ant.strftime('%B %Y')}</b>"
+                        f"<b>Error diario (Real − Pred) — {fundo} — {variable} — "
+                        f"{primer_dia_ant.strftime('%B %Y')}</b>  "
+                        f"<span style='font-size:10px;color:#546E7A'>"
+                        f"🟢 subestima (+°C) &nbsp; 🔴 sobreestima (−°C)</span>"
                     ),
                     font=dict(size=12), x=0.0
                 ),
                 xaxis=dict(tickformat='%d/%b', gridcolor='#CFD8DC'),
                 yaxis=dict(
-                    title=f'{variable} (°C)',
+                    title='Error (°C)',
                     ticksuffix='°C',
-                    gridcolor='#CFD8DC'
-                ),
-                yaxis2=dict(
-                    title='% Error',
-                    ticksuffix='%',
-                    overlaying='y',
-                    side='right',
-                    showgrid=False,
-                    range=[0, max(comparacion['Error_pct'].max() * 2, 10)]
+                    gridcolor='#CFD8DC',
+                    range=[_y_min, _y_max],
+                    dtick=1,
+                    tickvals=[-3, -2, -1, 0, 1, 2, 3],
+                    ticktext=['-3°C', '-2°C', '-1°C', '0°C', '+1°C', '+2°C', '+3°C'],
+                    zeroline=False,
                 ),
                 legend=dict(orientation='h', y=-0.15, x=0),
                 hovermode='x unified',
                 paper_bgcolor='#FFFFFF',
                 plot_bgcolor='rgba(0,0,0,0)',
                 font=dict(family='Arial', size=9),
-                margin=dict(l=50, r=50, t=50, b=40),
-                barmode='overlay'
+                margin=dict(l=50, r=30, t=60, b=40),
             )
 
-            st.plotly_chart(fig_val, use_container_width=True)
-
-            # ── Tabla detalle ──────────────────────────────────────
+            st.plotly_chart(fig_val, use_container_width=True,
+                            key=f"fig_val_{variable}_{fundo}")
+ 
+            # ── Tabla detalle — agrega Error_signed_pct ────────
             tabla_show = comparacion[
-                ['Fecha', 'Real', 'Pred', 'Error_abs', 'Error_pct']
+                ['Fecha', 'Real', 'Pred', 'Error_abs', 'Error_signed_pct']
             ].copy()
-            tabla_show['Fecha']     = tabla_show['Fecha'].dt.strftime('%d/%m/%Y')
-            tabla_show['Semáforo']  = comparacion['Error_pct'].apply(
+            tabla_show['Fecha']           = tabla_show['Fecha'].dt.strftime('%d/%m/%Y')
+            tabla_show['Semáforo']        = comparacion['Error_pct'].apply(
                 lambda x: '🟢' if x <= 2 else '🟡' if x <= 5 else '🔴'
             )
-            tabla_show['Real']      = tabla_show['Real'].map('{:.1f}'.format)
-            tabla_show['Pred']      = tabla_show['Pred'].map('{:.1f}'.format)
-            tabla_show['Error_abs'] = tabla_show['Error_abs'].map('{:.1f}'.format)
-            tabla_show['Error_pct'] = tabla_show['Error_pct'].map('{:.2f}'.format)
-
+            tabla_show['Real']            = tabla_show['Real'].map('{:.1f}'.format)
+            tabla_show['Pred']            = tabla_show['Pred'].map('{:.1f}'.format)
+            tabla_show['Error_abs']       = tabla_show['Error_abs'].map('{:.1f}'.format)
+            tabla_show['Error_signed_pct'] = tabla_show['Error_signed_pct'].map('{:+.2f}%'.format)
             tabla_show.columns = [
                 'Fecha', f'{variable} Real', f'{variable} Pred',
-                'Error abs (°C)', 'Error (%)', 'Semáforo'
+                'Error abs (°C)', 'Error % (signo)', 'Semáforo'
             ]
-            
-                        # ── Leyenda semáforo ───────────────────────────────────────
+ 
             st.markdown("""
-            <div style="display:flex; gap:20px; font-size:0.78rem; color:#546E7A; margin-bottom:6px;">
-                <span>🟢 Error ≤ 2% — Excelente</span>
-                <span>🟡 Error ≤ 5% — Aceptable</span>
-                <span>🔴 Error > 5% — Revisar</span>
-                <span style="color:#888; font-style:italic">| (+) Prophet subestimó &nbsp; (−) Prophet sobreestimó</span>
+            <div style="display:flex;gap:20px;font-size:0.78rem;color:#546E7A;margin-bottom:6px;">
+                <span>🟢 Error abs ≤ 2% — Excelente</span>
+                <span>🟡 Error abs ≤ 5% — Aceptable</span>
+                <span>🔴 Error abs > 5% — Revisar</span>
+                <span style="color:#1565C0">+ = subestima · − = sobreestima</span>
             </div>
             """, unsafe_allow_html=True)
-
-            st.dataframe(
-                tabla_show, use_container_width=True,
-                hide_index=True, height=280
+ 
+            st.dataframe(tabla_show, use_container_width=True,
+                         hide_index=True, height=280)
+ 
+            st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
+ 
+        # ── BOX PLOT ───────────────────────────────────────────
+        if datos_boxplot:
+            df_box = pd.DataFrame(datos_boxplot)
+ 
+            fig_box = go.Figure()
+ 
+            colores_box = [
+                '#1565C0', '#C62828', '#2E7D32',
+                '#F57F17', '#6A1B9A', '#00838F'
+            ]
+ 
+            for idx_f, fundo in enumerate(fundos):
+                df_f = df_box[df_box['Fundo'] == fundo]['Error']
+                if df_f.empty:
+                    continue
+ 
+                color = colores_box[idx_f % len(colores_box)]
+ 
+                fig_box.add_trace(go.Box(
+                    y=df_f,
+                    name=fundo,
+                    boxpoints='all',
+                    jitter=0.4,
+                    pointpos=0,
+                    marker=dict(
+                        color=color,
+                        size=5,
+                        opacity=0.6,
+                        line=dict(color='white', width=0.5)
+                    ),
+                    line=dict(color=color, width=2),
+                    fillcolor=f'rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.15)',
+                    hovertemplate=(
+                        f'<b>{fundo}</b><br>'
+                        'Error: %{y:+.2f}°C<extra></extra>'
+                    )
+                ))
+            # ── Banda sombreada ±1°C ──
+            fig_box.add_hrect(
+                y0=-1, y1=1,
+                fillcolor='rgba(76, 175, 80, 0.08)',
+                line_width=0,
             )
+
+            # ── Líneas de referencia simétricas ──
+            for val, color_l, label in [
+                ( 1.0, '#4CAF50', '+1°C — Excelente'),
+                (-1.0, '#4CAF50', '-1°C'),
+            ]:
+                fig_box.add_hline(
+                    y=val,
+                    line=dict(color=color_l, width=1.5, dash='dot'),
+                    annotation_text=label,
+                    annotation_position="top right" if val > 0 else "bottom right",
+                    annotation_font=dict(size=8, color=color_l)
+                )
+
+            fig_box.update_layout(
+                height=420,
+                title=dict(
+                    text=(
+                        f"<b>📦 Distribución % Error por Fundo — {variable}</b>  "
+                        f"<span style='font-size:9px;color:#546E7A'>"
+                        f"Mes anterior · cada punto = 1 día · + subestima · − sobreestima</span>"
+                    ),
+                    font=dict(size=13, color='#1A1A1A'),
+                    x=0.0
+                ),
+                xaxis=dict(
+                    title='Fundo',
+                    gridcolor='#CFD8DC',
+                ),
+                yaxis=dict(
+                    title='Error diario (°C, con signo)',
+                    ticksuffix='°C',
+                    gridcolor='#CFD8DC',
+                    tickvals=[-3, -2, -1, 0, 1, 2, 3],
+                    ticktext=['-3°C', '-2°C', '-1°C', '0°C', '+1°C', '+2°C', '+3°C'],
+                    range=[-3.5, 3.5],
+                ),
+                paper_bgcolor='#FFFFFF',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(family='Arial', size=9, color='#333333'),
+                showlegend=False,
+                margin=dict(l=60, r=40, t=60, b=40),
+            )
+ 
+            st.plotly_chart(fig_box, use_container_width=True,
+                            key=f"fig_box_{variable}")
 
 def generar_range_plot(variable, historico_df, prediccion_df, fundo_name, row, fig):
     """Agrega Range Plot con Error Bars (barras Tmin-Tmax)."""
@@ -1760,41 +1949,133 @@ def _leer_normales_desde_disco(path: str):
     with open(path, 'rb') as f:
         return f.read()
 
-def cargar_normales_fijo():
-    if not os.path.exists(NORMALES_PATH):
-        st.error(f"**Archivo de normales no encontrado.**\n```\n{NORMALES_PATH}\n```")
-        return None
+@st.cache_data(show_spinner=False)
+def cargar_normales_dinamico(_file_bytes, distrito_sel: str):
+    """
+    Carga normales SENAMHI para el distrito seleccionado dinámicamente.
+    Reemplaza completamente a cargar_normales_fijo().
+    """
     try:
-        norm_bytes = _leer_normales_desde_disco(NORMALES_PATH)
-        MEDIA_TMAX, Q1_TMAX, Q3_TMAX, estaciones_tmax = cargar_normales(norm_bytes, 'TMAX')
-        MEDIA_TMIN, Q1_TMIN, Q3_TMIN, _ = cargar_normales(norm_bytes, 'TMIN')
+        # Función interna que usa distrito dinámico (no la constante DISTRITO_BUSCAR)
+        def _cargar_hoja(hoja):
+            raw = pd.read_excel(io.BytesIO(_file_bytes), sheet_name=hoja, header=None)
+            header_row = None
+            for idx, row in raw.iterrows():
+                vals = [_normalizar(str(v)) for v in row.values if pd.notna(v)]
+                if 'DISTRITO' in vals:
+                    header_row = idx
+                    break
+ 
+            if header_row is None:
+                raise ValueError(f"No se encontró fila con 'DISTRITO' en hoja '{hoja}'.")
+ 
+            df = pd.read_excel(io.BytesIO(_file_bytes), sheet_name=hoja, header=header_row)
+            df.columns = [str(c).strip() for c in df.columns]
+ 
+            col_distrito = next((c for c in df.columns if _normalizar(c) == 'DISTRITO'), None)
+            if col_distrito is None:
+                raise ValueError("Columna DISTRITO no encontrada.")
+ 
+            # Filtrar por distrito seleccionado dinámicamente
+            df['_dist_norm'] = df[col_distrito].astype(str).apply(_normalizar)
+            df_f = df[df['_dist_norm'].str.contains(distrito_sel, na=False)].copy()
+ 
+            if df_f.empty:
+                raise ValueError(f"No se encontraron datos para el distrito '{distrito_sel}'.")
+ 
+            # Extraer valores mensuales
+            meses_encontrados = {}
+            for col in df.columns:
+                col_norm = _normalizar(col)
+                for mes in MESES_RAW:
+                    if col_norm == _normalizar(mes) and mes not in meses_encontrados:
+                        meses_encontrados[mes] = col
+                        break
+ 
+            meses_faltantes = [m for m in MESES_RAW if m not in meses_encontrados]
+            if meses_faltantes:
+                raise ValueError(f"Columnas de meses no encontradas: {meses_faltantes}")
+ 
+            cols_meses = [meses_encontrados[m] for m in MESES_RAW]
+            valores = df_f[cols_meses].apply(pd.to_numeric, errors='coerce').mean(axis=0).values
+ 
+            col_nombre = next((c for c in df.columns if _normalizar(c) == 'NOMBRE ESTACION'), col_distrito)
+            col_prov   = next((c for c in df.columns if _normalizar(c) == 'PROVINCIA'), col_distrito)
+ 
+            return (
+                valores,
+                valores - DELTA_Q,
+                valores + DELTA_Q,
+                df_f[[col_nombre, col_prov, col_distrito]].drop_duplicates()
+            )
+ 
+        MEDIA_TMAX, Q1_TMAX, Q3_TMAX, estaciones_tmax = _cargar_hoja('TMAX')
+        MEDIA_TMIN, Q1_TMIN, Q3_TMIN, _               = _cargar_hoja('TMIN')
+ 
         return MEDIA_TMAX, Q1_TMAX, Q3_TMAX, MEDIA_TMIN, Q1_TMIN, Q3_TMIN, estaciones_tmax
+ 
     except Exception as e:
-        st.error(f"Error al leer normales SENAMHI: {e}")
+        st.error(f"Error al cargar normales para '{distrito_sel}': {e}")
         return None
+ 
 
 # ──── SIDEBAR MEJORADO ────
+norm_bytes_sidebar = _leer_normales_desde_disco(NORMALES_PATH) if os.path.exists(NORMALES_PATH) else None
+
 with st.sidebar:
     st.markdown("## ⚙️ CONFIGURACIÓN")
-    
-    # Sección 1: Archivo
+
     with st.expander("📂 **Archivo meteorológico**", expanded=True):
         st.markdown("### 📊 **Archivo meteorológico**")
         st.info("✅ Leyendo: `assets/Metereologia_Prize.xlsx`")
-    
+
     st.divider()
-    
-    # Sección 2: Fundos
+
     st.markdown("### 🌿 **Fundos**")
     fundos_disponibles_placeholder = st.empty()
-    
+
     st.divider()
-    
-    # Estado de normales
-    if os.path.exists(NORMALES_PATH):
-        st.success("✅ Normales SENAMHI cargadas")
+
+    # ── Climatología dinámica ──────────────────────────────
+    st.markdown("### 🌦️ **Climatología SENAMHI**")
+
+    if norm_bytes_sidebar is not None:
+        catalogo = cargar_catalogo_normales(norm_bytes_sidebar, 'TMAX')
+
+        if catalogo:
+            deptos_lista = sorted(catalogo.keys())
+
+            depto_default = next(
+                (i for i, d in enumerate(deptos_lista) if 'LIBERTAD' in d), 0
+            )
+
+            depto_sel = st.selectbox(
+                "Departamento",
+                options=deptos_lista,
+                index=depto_default,
+                key='depto_sel'
+            )
+
+            distritos_lista = catalogo.get(depto_sel, [])
+
+            dist_default = next(
+                (i for i, d in enumerate(distritos_lista) if 'GUADALUPE' in d), 0
+            )
+
+            distrito_sel = st.selectbox(
+                "Estación / Distrito",
+                options=distritos_lista,
+                index=dist_default,
+                key='distrito_sel'
+            )
+
+            st.success(f"✅ Climatología: **{distrito_sel}**")
+        else:
+            st.error("❌ No se pudo leer el catálogo.")
+            distrito_sel = DISTRITO_BUSCAR
     else:
         st.error("❌ Normales SENAMHI no encontradas")
+        distrito_sel = DISTRITO_BUSCAR
 
 # ──── HEADER ────
 st.markdown("""
@@ -1811,7 +2092,7 @@ min_reg_ui = MIN_REGISTROS  # Registros mínimos por día (valor de constante)
 dias_pred_ui = 30  # Días de predicción Prophet
 
 # ──── CARGAR NORMALES ────
-normales = cargar_normales_fijo()
+normales = cargar_normales_dinamico(norm_bytes_sidebar, distrito_sel)
 if normales is None:
     st.stop()
 
