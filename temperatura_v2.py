@@ -3874,11 +3874,16 @@ with st.spinner("Conectando a Fabric..."):
         SQL_PASS = st.secrets["SQL_PASS"]
         
         # ✅ FUNCIONA CON FABRIC
+        # ✅ NUEVO (funciona en Cloud):
         connection_string = (
             f'Driver={{ODBC Driver 17 for SQL Server}};'
             f'Server={SQL_SERVER};'
             f'Database={SQL_DB};'
-            f'Authentication=ActiveDirectoryInteractive;'
+            f'UID={SQL_USER};'
+            f'PWD={SQL_PASS};'
+            f'Encrypt=yes;'
+            f'TrustServerCertificate=no;'
+            f'Connection Timeout=30;'
         )
         
         import pyodbc
