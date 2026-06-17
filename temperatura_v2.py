@@ -22,6 +22,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 import streamlit as st
+import msal
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -3866,32 +3867,99 @@ else:
     MEDIA_TMAX2 = Q1_TMAX2 = Q3_TMAX2 = None
     MEDIA_TMIN2 = Q1_TMIN2 = Q3_TMIN2 = None
 # ──── CONEXIÓN A FABRIC (via st.secrets) ────
-with st.spinner("Conectando a Fabric..."):
+# ══════════════════════════════════════════════════════════════
+# ✅ CONEXIÓN HÍBRIDA - LOCAL + STREAMLIT CLOUD
+# ══════════════════════════════════════════════════════════════
+def conectar_fabric():
+    """Conecta a Fabric detectando si es local o Streamlit Cloud."""
+    import os
+    import pyodbc
+    
+    SQL_SERVER = st.secrets["SQL_SERVER"]
+    SQL_DB = st.secrets["SQL_DB"]
+    SQL_USER = st.secrets["SQL_USER"]
+    SQL_PASS = st.secrets["SQL_PASS"]
+    
+    # Detectar entorno
+    es_streamlit_cloud = os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true"
+    
+    if es_streamlit_cloud:
+        # ── STREAMLIT CLOUD: MSAL Device Code Flow ─────────────
+        try:
+            import msal
+            
+            st.info("🔐 Iniciando autenticación Azure AD (Device Code)...")
+            
+            app = msal.PublicClientApplication(
+                client_id="04b07795-8ddb-461a-bbee-02f9e1bf7b46",  # Azure CLI
+                authority="https://login.microsoftonline.com/common"
+            )
+            
+            flow = app.initiate_device_flow(
+                scopes=["https://database.windows.net/.default"]
+            )
+            
+            st.warning(
+                f"📱 **Abre este link en otro dispositivo:**\n\n"
+                f"{flow.get('verification_uri')}\n\n"
+                f"**Código:** `{flow.get('user_code')}`"
+            )
+            
+            result = app.acquire_token_by_device_flow(flow)
+            
+            if "access_token" not in result:
+                st.error(f"❌ Autenticación fallida: {result.get('error_description')}")
+                return None
+            
+            connection_string = (
+                f'Driver={{ODBC Driver 17 for SQL Server}};'
+                f'Server={SQL_SERVER};'
+                f'Database={SQL_DB};'
+                f'UID={SQL_USER};'
+                f'PWD={SQL_PASS};'
+                f'Encrypt=yes;'
+                f'TrustServerCertificate=no;'
+                f'Connection Timeout=30;'
+            )
+            
+        except ImportError:
+            st.error("❌ Falta `msal` en requirements.txt")
+            return None
+        except Exception as e:
+            st.error(f"❌ Error MSAL: {e}")
+            return None
+    
+    else:
+        # ── LOCAL: Autenticación interactiva Azure AD ─────────────
+        try:
+            connection_string = (
+                f'Driver={{ODBC Driver 17 for SQL Server}};'
+                f'Server={SQL_SERVER};'
+                f'Database={SQL_DB};'
+                f'Authentication=ActiveDirectoryInteractive;'
+                f'Encrypt=yes;'
+                f'Connection Timeout=30;'
+            )
+        except Exception as e:
+            st.error(f"❌ Error local: {e}")
+            return None
+    
+    # Conectar con la string
     try:
-        SQL_SERVER = st.secrets["SQL_SERVER"]
-        SQL_DB = st.secrets["SQL_DB"]
-        SQL_USER = st.secrets["SQL_USER"]
-        SQL_PASS = st.secrets["SQL_PASS"]
-        
-        # ✅ FUNCIONA CON FABRIC
-        # ✅ NUEVO (funciona en Cloud):
-        connection_string = (
-            f'Driver={{ODBC Driver 17 for SQL Server}};'
-            f'Server={SQL_SERVER};'
-            f'Database={SQL_DB};'
-            f'UID={SQL_USER};'
-            f'PWD={SQL_PASS};'
-            f'Encrypt=yes;'
-            f'TrustServerCertificate=no;'
-            f'Connection Timeout=30;'
-        )
-        
-        import pyodbc
-        conn_fabric = pyodbc.connect(connection_string)
+        conn = pyodbc.connect(connection_string)
         st.success("✅ Conectado a Fabric")
+        return conn
     except Exception as e:
-        st.error(f"❌ Error conexión Fabric: {e}")
-        st.info("Verifica `.streamlit/secrets.toml`")
+        st.error(f"❌ Error conexión: {e}")
+        return None
+
+
+# ── LLAMAR LA FUNCIÓN ────────────────────────────────────────
+with st.spinner("Conectando a Fabric..."):
+    conn_fabric = conectar_fabric()
+    
+    if conn_fabric is None:
+        st.error("No se pudo conectar a Fabric")
         st.stop()
 # ──── CARGAR ET MENSUAL PROMEDIO ────
 @st.cache_data(ttl=3600, show_spinner=False)
