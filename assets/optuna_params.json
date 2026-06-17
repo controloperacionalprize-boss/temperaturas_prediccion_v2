@@ -1,0 +1,9 @@
+{
+  "Arena Azul__Tmax": {
+    "changepoint_prior_scale": 0.08,
+    "seasonality_prior_scale": 6.0,
+    "yearly_fourier_order": 18,
+    "monthly_fourier_order": 7,
+    "biweekly_fourier_order": 4
+  }
+}
