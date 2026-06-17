@@ -305,10 +305,23 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
-def _normalizar(s: str) -> str:
+def _normalizar(s) -> str:
     import unicodedata
+    import pandas as pd
+    
+    # Proteger contra NaN, None y floats
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ''
+    
+    # Convertir a string si no lo es
+    s = str(s).strip()
+    
+    # Descartar "nan" literals
+    if s.lower() == 'nan' or s == '':
+        return ''
+    
+    # Normalizar
     return unicodedata.normalize('NFKD', s).encode('ascii', errors='ignore').decode('utf-8').upper().strip()
-
 # ══════════════════════════════════════════════════════════════
 # LECTURA OPTIMIZADA
 # ══════════════════════════════════════════════════════════════
