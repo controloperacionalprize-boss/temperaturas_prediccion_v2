@@ -27,6 +27,7 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import re
+import pyodbc
 try:
     import requests
     REQUESTS_DISPONIBLE = True
@@ -472,7 +473,6 @@ def download_kmz_from_github() -> bytes | None:
             resp = urllib.request.urlopen(req, timeout=30)
             kmz_bytes = resp.read()
             
-            st.write(f"✅ KMZ descargado: {len(kmz_bytes)} bytes desde {url.split('/')[-2]}")
             return kmz_bytes
             
         except urllib.error.HTTPError as e:
@@ -3283,9 +3283,8 @@ def generar_mapa_et(modulos_kmz, et_por_fundo, colormap_et=None, df_et_mensual=N
 
     return m
 
-def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None, 
-                   riesgos_et_pre=None):  # ← RECIBE pre-calculado
-    """Gráfico ET diaria + predicción mes siguiente por fundo."""
+def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
+                   riesgos_et_pre=None, df_et_mensual=None):
     import calendar
 
     fundos = dia['Fundo'].unique().tolist()
@@ -3293,9 +3292,10 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
     fecha_ini_anio = pd.Timestamp(year=anio_actual - 1, month=1, day=1)
 
     n = len(fundos)
-    altura_et = 300 * n   # mismo alto que usa fig.update_layout(height=300*n, ...)
+    altura_et = 300 * n
 
     col_graf_et, col_mapa_et = st.columns([3, 1])
+
     fig = make_subplots(
         rows=n, cols=1,
         shared_xaxes=False,
@@ -3318,14 +3318,10 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
         if et_df.empty or et_df['ET'].sum() == 0:
             continue
 
-        empresa  = sub['Empresa'].iloc[0]
-        et_total = et_df['ET'].sum().round(2)
-        et_prom  = et_df['ET'].mean().round(2)
-
         # ── Fechas clave ───────────────────────────────────────
         fecha_fin_raw         = pd.to_datetime(et_df['Fecha'].max()).normalize()
         primer_dia_mes_actual = fecha_fin_raw.replace(day=1)
-        fecha_fin_norm        = primer_dia_mes_actual - pd.Timedelta(days=1)  # 31 mayo
+        fecha_fin_norm        = primer_dia_mes_actual - pd.Timedelta(days=1)
         ultimo_dia_mes_actual = pd.Timestamp(
             year=primer_dia_mes_actual.year,
             month=primer_dia_mes_actual.month,
@@ -3333,36 +3329,89 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                 primer_dia_mes_actual.year,
                 primer_dia_mes_actual.month
             )[1]
-        )  # 30 junio
+        )
 
-        # ── Datos reales — TODOS los disponibles ──────────────
-        et_real = et_df[et_df['Fecha'] <= fecha_fin_norm].copy()
+        et_real = et_df[et_df['Fecha'] <= fecha_fin_norm].copy().reset_index(drop=True)
 
+        # ── Suavizado rolling 3 días (igual que temperatura) ──
+        et_real['ET_smooth'] = (
+            et_real['ET']
+            .rolling(ROLLING_DIAS, center=True, min_periods=1)
+            .mean()
+            .round(2)
+        )
 
-        # ── Línea real ─────────────────────────────────────────
+        # ── Climatología ET diaria via spline ─────────────────
+        if df_et_mensual is not None and not df_et_mensual.empty:
+            sub_et_clim = (
+                df_et_mensual[df_et_mensual['Fundo'] == fundo]
+                .sort_values('Mes')
+                .reset_index(drop=True)
+            )
+            if len(sub_et_clim) == 12:
+                valores_et_clim = sub_et_clim['EToPromedioDiaria'].values.tolist()
+                delta_et = round(np.std(valores_et_clim) * Z_Q, 2)
+
+                fecha_ini_clima_et = pd.Timestamp(et_real['Fecha'].min()).strftime('%Y-%m-%d')
+                fecha_fin_clima_et = (ultimo_dia_mes_actual + pd.Timedelta(days=2)).strftime('%Y-%m-%d')
+
+                clim_et_media = spline_diario_cached(
+                    fecha_ini_clima_et, fecha_fin_clima_et,
+                    tuple(valores_et_clim)
+                )
+                clim_et_q1 = spline_diario_cached(
+                    fecha_ini_clima_et, fecha_fin_clima_et,
+                    tuple([max(0.0, v - delta_et) for v in valores_et_clim])
+                )
+                clim_et_q3 = spline_diario_cached(
+                    fecha_ini_clima_et, fecha_fin_clima_et,
+                    tuple([v + delta_et for v in valores_et_clim])
+                )
+
+                # Banda Q1-Q3
+                fig.add_trace(go.Scatter(
+                    x=clim_et_q3['Fecha'], y=clim_et_q3['Valor'],
+                    mode='lines', line=dict(width=0),
+                    showlegend=False, hoverinfo='skip'
+                ), row=row, col=1)
+                fig.add_trace(go.Scatter(
+                    x=clim_et_q1['Fecha'], y=clim_et_q1['Valor'],
+                    mode='lines', line=dict(width=0),
+                    fill='tonexty',
+                    fillcolor='rgba(2, 136, 209, 0.12)',
+                    showlegend=(i == 0),
+                    name=f'Banda ET histórica (±{delta_et:.2f} mm/día)',
+                    hoverinfo='skip'
+                ), row=row, col=1)
+
+                # Línea media
+                fig.add_trace(go.Scatter(
+                    x=clim_et_media['Fecha'], y=clim_et_media['Valor'],
+                    mode='lines',
+                    line=dict(color='#0277BD', width=2.2),
+                    showlegend=(i == 0),
+                    name='ET climatología histórica',
+                    hovertemplate='%{x|%d/%b}<br>ET clim: %{y:.2f} mm/día<extra></extra>'
+                ), row=row, col=1)
+
+        # ── Línea real (smooth) ────────────────────────────────
         fig.add_trace(go.Scatter(
             x=et_real['Fecha'],
-            y=et_real['ET'],
+            y=et_real['ET_smooth'],
             mode='lines+markers',
-            line=dict(color='#1565C0', width=1.8),
-            marker=dict(size=4, color='white', line=dict(color='#1565C0', width=1.2)),
+            line=dict(color='#000000', width=1.5),
+            marker=dict(size=5, color='white', line=dict(color='#000000', width=1.0)),
+            customdata=et_real['ET'],
             name='ET real',
             showlegend=(i == 0),
-            fill='tozeroy',
-            fillcolor='rgba(21, 101, 192, 0.08)',
-            hovertemplate='%{x|%d/%b/%Y}<br>ET: %{y:.2f} mm<extra>' + fundo + '</extra>'
+            hovertemplate='%{x|%d/%b/%Y}<br>ET: %{customdata:.2f} mm<br>ET suav: %{y:.2f} mm<extra>' + fundo + '</extra>'
         ), row=row, col=1)
 
+        # ── Cuartiles horizontales ─────────────────────────────
+        if not et_real.empty:
+            q1 = et_real['ET_smooth'].quantile(0.25)
+            q3 = et_real['ET_smooth'].quantile(0.75)
 
-        # ✅ NUEVO - Agregar líneas de cuartiles
-        if not et_df.empty:
-            # Calcular cuartiles
-            q1 = et_df['ET'].quantile(0.25)
-            q2 = et_df['ET'].quantile(0.50)
-            q3 = et_df['ET'].quantile(0.75)
-            p95 = et_df['ET'].quantile(0.95)
-            
-            # Q1 (Percentil 25) - línea azul clara
             fig.add_hline(
                 y=q1,
                 line=dict(color='#B3E5FC', width=1, dash='dash'),
@@ -3371,10 +3420,6 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                 annotation_font=dict(size=7, color='#0288D1'),
                 row=row, col=1
             )
-            
-           
-            
-            # Q3 (Percentil 75) - línea azul oscura
             fig.add_hline(
                 y=q3,
                 line=dict(color='#01579B', width=1, dash='dash'),
@@ -3383,21 +3428,21 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                 annotation_font=dict(size=7, color='#01579B'),
                 row=row, col=1
             )
-            
 
         # ── Anotación último valor real ────────────────────────
-        fig.add_annotation(
-            x=et_real['Fecha'].iloc[-1],
-            y=float(et_real['ET'].iloc[-1]),
-            text=f"<b>{float(et_real['ET'].iloc[-1]):.2f}</b>",
-            showarrow=True, arrowhead=2,
-            arrowcolor='#1565C0', arrowwidth=1.0,
-            ax=14, ay=-18,
-            font=dict(size=9, color='#1565C0'),
-            row=row, col=1
-        )
+        if not et_real.empty:
+            fig.add_annotation(
+                x=et_real['Fecha'].iloc[-1],
+                y=float(et_real['ET'].iloc[-1]),
+                text=f"<b>{float(et_real['ET'].iloc[-1]):.2f}</b>",
+                showarrow=True, arrowhead=2,
+                arrowcolor='#000000', arrowwidth=1.0,
+                ax=14, ay=-18,
+                font=dict(size=9, color='#000000'),
+                row=row, col=1
+            )
 
-        # ── Línea vertical 31 mayo ─────────────────────────────
+        # ── Línea vertical corte real/predicción ──────────────
         fig.add_vline(
             x=fecha_fin_norm,
             line=dict(color='#546E7A', width=1.2, dash='dot'),
@@ -3410,63 +3455,55 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
 
         if not forecast_et.empty:
             forecast_et = forecast_et.copy()
-            forecast_et['ds'] = pd.to_datetime(
-                forecast_et['ds']
-            ).dt.tz_localize(None).dt.normalize()
+            forecast_et['ds'] = (
+                pd.to_datetime(forecast_et['ds'])
+                .dt.tz_localize(None)
+                .dt.normalize()
+            )
 
-            # Mes completo desde 1 junio hasta 30 junio
             pred_et = forecast_et[
                 (forecast_et['ds'] >= primer_dia_mes_actual) &
                 (forecast_et['ds'] <= ultimo_dia_mes_actual)
             ].reset_index(drop=True)
-            # ── Calcular amplitud histórica del mismo mes ──────────
-            mes_actual = primer_dia_mes_actual.month
+
+            mes_actual_num = primer_dia_mes_actual.month
             et_mismo_mes = et_df[
-                pd.to_datetime(et_df['Fecha']).dt.month == mes_actual
+                pd.to_datetime(et_df['Fecha']).dt.month == mes_actual_num
             ]['ET']
 
             if len(et_mismo_mes) >= 5:
-                    std_historica = et_mismo_mes.std()
-                    amp_max = et_mismo_mes.max()
-                    amp_min = et_mismo_mes.min()
+                std_historica = et_mismo_mes.std()
+                amp_max       = et_mismo_mes.max()
             else:
-                    std_historica = et_df['ET'].std()
-                    amp_max = et_df['ET'].max()
-                    amp_min = et_df['ET'].min()
+                std_historica = et_df['ET'].std()
+                amp_max       = et_df['ET'].max()
 
-                # ← AQUÍ, fuera del else, siempre se ejecuta
-            pred_et = pred_et.copy()
-            ventana_patron = min(30, len(et_real))
-            et_ventana = et_real['ET'].values[-ventana_patron:]
-            media_ventana = et_ventana.mean()
-            desviacion = et_ventana - media_ventana
+            if not pred_et.empty and not et_real.empty:
+                ventana_patron = min(30, len(et_real))
+                et_ventana     = et_real['ET'].values[-ventana_patron:]
+                desviacion     = et_ventana - et_ventana.mean()
 
-            n_pred = len(pred_et)
-            indices = [j % len(desviacion) for j in range(n_pred)]
-            patron_ciclado = desviacion[indices]
+                n_pred         = len(pred_et)
+                patron_ciclado = desviacion[[j % len(desviacion) for j in range(n_pred)]]
 
-            std_actual = np.std(desviacion)
-            factor = std_historica / (std_actual + 1e-6)
-            factor = min(factor, 1.5)
+                std_actual = np.std(desviacion)
+                factor     = min(std_historica / (std_actual + 1e-6), 1.5)
 
-            pred_et['yhat'] = (
-                pred_et['yhat'] + patron_ciclado * factor
-            ).clip(lower=0).round(2)
+                pred_et = pred_et.copy()
+                pred_et['yhat']       = (pred_et['yhat'] + patron_ciclado * factor).clip(lower=0).round(2)
+                pred_et['yhat_upper'] = (pred_et['yhat'] + std_historica * 0.8).clip(upper=float(amp_max)).round(2)
+                pred_et['yhat_lower'] = (pred_et['yhat'] - std_historica * 0.8).clip(lower=0.0).round(2)
 
-            pred_et['yhat_upper'] = (pred_et['yhat'] + std_historica * 0.8).clip(upper=float(amp_max)).round(2)
-            pred_et['yhat_lower'] = (pred_et['yhat'] - std_historica * 0.8).clip(lower=0.0).round(2)
-            if not pred_et.empty:
-                # Conector desde 31 mayo → 1 junio predicho
-                et_val_ultimo = float(et_real['ET'].iloc[-1])
+                # Conector desde último smooth → primer predicho
                 fig.add_trace(go.Scatter(
                     x=[et_real['Fecha'].iloc[-1], pred_et['ds'].iloc[0]],
-                    y=[et_val_ultimo, float(pred_et['yhat'].iloc[0])],
+                    y=[float(et_real['ET_smooth'].iloc[-1]), float(pred_et['yhat'].iloc[0])],
                     mode='lines',
                     line=dict(color='#43A047', width=1.8, dash='dash'),
                     showlegend=False, hoverinfo='skip'
                 ), row=row, col=1)
 
-                # Banda IC 95%
+                # Banda IC
                 fig.add_trace(go.Scatter(
                     x=pred_et['ds'].tolist() + pred_et['ds'].tolist()[::-1],
                     y=pred_et['yhat_upper'].tolist() + pred_et['yhat_lower'].tolist()[::-1],
@@ -3488,7 +3525,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                     hovertemplate='%{x|%d/%b/%Y}<br>ET pred: %{y:.2f} mm<extra>Prophet</extra>'
                 ), row=row, col=1)
 
-                # Anotación último valor predicho
+                # Anotación último predicho
                 fig.add_annotation(
                     x=pred_et['ds'].iloc[-1],
                     y=float(pred_et['yhat'].iloc[-1]),
@@ -3500,6 +3537,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                     row=row, col=1
                 )
 
+        # ── Subplot título ─────────────────────────────────────
         fig.layout.annotations[i].update(
             text=f"<b>💧 {fundo}</b>",
             font=dict(size=13, color='#00838F'),
@@ -3547,17 +3585,20 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
     )
 
     with col_graf_et:
-            st.plotly_chart(fig, use_container_width=True, key="fig_et_main")
+        st.plotly_chart(fig, use_container_width=True, key="fig_et_main")
 
     with col_mapa_et:
         et_por_fundo = calcular_et_suma_semanal_fundos(dia)
         colormap_et, leyenda_et_data = crear_colormap_y_leyenda_et(et_por_fundo)
-        mapa_et = generar_mapa_et(modulos_kmz, et_por_fundo, colormap_et, 
-                                   df_et_mensual, riesgos_et_pre)  # ← USA pre-calculado
+        mapa_et = generar_mapa_et(
+            modulos_kmz, et_por_fundo, colormap_et,
+            df_et_mensual, riesgos_et_pre
+        )
         if mapa_et is not None:
             from streamlit_folium import st_folium
             st_folium(mapa_et, width=None, height=altura_et,
-                    returned_objects=[], key='mapa_et')    
+                      returned_objects=[], key='mapa_et')
+
     # ── KPIs resumen ───────────────────────────────────────────
     st.markdown("#### 📊 Resumen ET por fundo")
     cols = st.columns(len(fundos))
@@ -3572,8 +3613,6 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                 f"{sub_et.sum():.1f} mm",
                 f"Prom {sub_et.mean():.2f} mm/día"
             )
-
-
 
 
 def asignar_fundo(fundo_aq, mod_n):
@@ -3822,16 +3861,8 @@ distritos_senamhi = obtener_distritos_senamhi(norm_bytes_sidebar, 'TMAX') if nor
 distritos_senamhi = obtener_distritos_senamhi(norm_bytes_sidebar, 'TMAX') if norm_bytes_sidebar is not None else set()
 
 _kmz_bytes_modulos = download_kmz_from_github()
-st.write(f"🔍 DEBUG: _kmz_bytes_modulos = {type(_kmz_bytes_modulos)}, tamaño = {len(_kmz_bytes_modulos) if _kmz_bytes_modulos else 'None'}")
-
 kmz_polygons = load_kmz_bytes(_kmz_bytes_modulos) if _kmz_bytes_modulos else []
-st.write(f"🔍 DEBUG: kmz_polygons = {len(kmz_polygons)} polígonos")
-
 modulos_kmz = disolver_modulos(kmz_polygons) if kmz_polygons else []
-st.write(f"🔍 DEBUG: modulos_kmz = {len(modulos_kmz)} módulos")
-
-if not modulos_kmz:
-    st.warning("⚠️ No se cargaron KMZ desde GitHub")
 
 # ──── HEADER ────
 st.markdown("""
@@ -3868,128 +3899,122 @@ else:
     MEDIA_TMIN2 = Q1_TMIN2 = Q3_TMIN2 = None
 
 def conectar_fabric():
-    """Conecta a Fabric - Local con navegador, Cloud con Device Code."""
     import os
+    import struct
     import pyodbc
     import msal
-    
+
     SQL_SERVER = st.secrets["SQL_SERVER"]
-    SQL_DB = st.secrets["SQL_DB"]
-    SQL_USER = st.secrets["SQL_USER"]
-    SQL_PASS = st.secrets["SQL_PASS"]
-    
-    # Detectar entorno (Streamlit Cloud vs Local)
+    SQL_DB     = st.secrets["SQL_DB"]
+
     en_cloud = "STREAMLIT_CLOUD" in os.environ or not os.getenv("DISPLAY")
-    
+
     try:
         app = msal.PublicClientApplication(
             client_id="04b07795-8ddb-461a-bbee-02f9e1bf7b46",
             authority="https://login.microsoftonline.com/common"
         )
-        
+
         if en_cloud:
-            # ── STREAMLIT CLOUD: Device Code Flow ───────────────────
-            st.warning("☁️ **Autenticación en Streamlit Cloud**")
-            
             flow = app.initiate_device_flow(
                 scopes=["https://database.windows.net/.default"]
             )
-            
             st.info(
-                f"📱 **Pasos:**\n\n"
-                f"1. Abre este link en tu navegador:\n"
-                f"   [{flow.get('verification_uri')}]({flow.get('verification_uri')})\n\n"
-                f"2. Ingresa este código: `{flow.get('user_code')}`\n\n"
-                f"3. Autoriza la app\n\n"
-                f"⏳ Esperando autenticación..."
+                f"📱 Ve a [{flow.get('verification_uri')}]({flow.get('verification_uri')}) "
+                f"e ingresa el código: `{flow.get('user_code')}`"
             )
-            
-            with st.spinner("Esperando que autorices en el navegador..."):
+            with st.spinner("Esperando autorización..."):
                 result = app.acquire_token_by_device_flow(flow)
-        
         else:
-            # ── LOCAL: Interactive Flow (abre navegador) ────────────
-            st.info("💻 Abriendo navegador para autenticación...")
-            
             result = app.acquire_token_interactive(
                 scopes=["https://database.windows.net/.default"],
                 prompt="select_account"
             )
-        
-        # Verificar token
+
         if "access_token" not in result:
-            error_msg = result.get('error_description', 'Token no obtenido')
-            st.error(f"❌ Autenticación fallida: {error_msg}")
-            
-            # Fallback: intentar conexión SQL directa
-            st.warning("⚠️ Intentando conexión SQL directa...")
-            try:
-                connection_string = (
-                    f'Driver={{ODBC Driver 17 for SQL Server}};'
-                    f'Server={SQL_SERVER};'
-                    f'Database={SQL_DB};'
-                    f'UID={SQL_USER};'
-                    f'PWD={SQL_PASS};'
-                    f'Encrypt=yes;'
-                    f'Connection Timeout=15;'
-                )
-                conn = pyodbc.connect(connection_string)
-                st.success("✅ Conectado con credenciales SQL")
-                return conn
-            except:
-                return None
-        
-        st.success("✅ Token obtenido correctamente")
-        
-        # Conectar a Fabric
-        connection_string = (
-            f'Driver={{ODBC Driver 17 for SQL Server}};'
-            f'Server={SQL_SERVER};'
-            f'Database={SQL_DB};'
-            f'UID={SQL_USER};'
-            f'PWD={SQL_PASS};'
-            f'Encrypt=yes;'
-            f'TrustServerCertificate=no;'
-            f'Connection Timeout=30;'
+            return _conectar_sql_directo()
+
+        token_bytes = result["access_token"].encode("utf-16-le")
+        token_struct = struct.pack(
+            f"<I{len(token_bytes)}s",
+            len(token_bytes),
+            token_bytes
         )
-        
-        conn = pyodbc.connect(connection_string)
-        st.success("✅ Conectado a Fabric SQL")
+        SQL_COPT_SS_ACCESS_TOKEN = 1256
+
+        connection_string = (
+            f"Driver={{ODBC Driver 17 for SQL Server}};"
+            f"Server={SQL_SERVER};"
+            f"Database={SQL_DB};"
+            f"Encrypt=yes;"
+            f"TrustServerCertificate=no;"
+            f"Connection Timeout=30;"
+        )
+
+        conn = pyodbc.connect(
+            connection_string,
+            attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}
+        )
         return conn
-        
+
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        return _conectar_sql_directo()
+
+def _conectar_sql_directo():
+    try:
+        SQL_SERVER = st.secrets["SQL_SERVER"]
+        SQL_DB     = st.secrets["SQL_DB"]
+        SQL_USER   = st.secrets["SQL_USER"]
+        SQL_PASS   = st.secrets["SQL_PASS"]
+
+        connection_string = (
+            f"Driver={{ODBC Driver 17 for SQL Server}};"
+            f"Server={SQL_SERVER};"
+            f"Database={SQL_DB};"
+            f"UID={SQL_USER};"
+            f"PWD={SQL_PASS};"
+            f"Encrypt=yes;"
+            f"Connection Timeout=15;"
+        )
+        return pyodbc.connect(connection_string)
+    except Exception as e:
+        st.error(f"❌ No se pudo conectar a Fabric: {e}")
         return None
 
-
 # ── CONEXIÓN PRINCIPAL ─────────────────────────────────────────
+
+def get_conn_fabric():
+    """Crea una conexión fresca a Fabric."""
+    return conectar_fabric()
+
+
+def ejecutar_query(query: str):
+    """Ejecuta una query con reconexión automática en caso de fallo."""
+    for intento in range(3):
+        try:
+            conn = get_conn_fabric()
+            if conn is None:
+                raise Exception("No se pudo obtener conexión")
+            return pd.read_sql(query, conn)
+        except Exception as e:
+            err = str(e)
+            # Si es error de comunicación, reintenta
+            if '08S01' in err or 'Communication link failure' in err or 'TCP Provider' in err:
+                if intento < 2:
+                    import time
+                    time.sleep(2)
+                    continue
+            raise  # Otro tipo de error, propaga
+    raise Exception("Falló tras 3 intentos de reconexión")
+
+# ── CONEXIÓN PRINCIPAL (única llamada) ────────────────────────
 with st.spinner("Conectando a Fabric..."):
-    try:
-        conn_fabric = conectar_fabric()
-        
-        if conn_fabric is None:
-            st.error("❌ No se pudo conectar a Fabric")
-            st.stop()
-        
-        st.success("✅ Conectado a Fabric")
-    except Exception as e:
-        st.error(f"❌ Error conexión: {e}")
+    conn_fabric = get_conn_fabric()
+    
+    if conn_fabric is None:
+        st.error("❌ No se pudo conectar a Fabric")
         st.stop()
 
-# ── CONECTAR ──────────────────────────────────────────────────
-with st.spinner("Conectando a Fabric..."):
-    conn_fabric = conectar_fabric()
-    
-    if conn_fabric is None:
-        st.stop()
-# ── LLAMAR LA FUNCIÓN ────────────────────────────────────────
-with st.spinner("Conectando a Fabric..."):
-    conn_fabric = conectar_fabric()
-    
-    if conn_fabric is None:
-        st.error("No se pudo conectar a Fabric")
-        st.stop()
-# ──── CARGAR ET MENSUAL PROMEDIO ────
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_et_mensual_promedio(_conn_fabric):  # ✅ guion bajo
     """Carga ET promedio diario mensual por fundo desde Fabric."""
@@ -4032,10 +4057,6 @@ def cargar_et_mensual_promedio(_conn_fabric):  # ✅ guion bajo
 # Cargar ET mensual
 df_et_mensual = cargar_et_mensual_promedio(conn_fabric)
 
-if not df_et_mensual.empty:
-    st.success(f"✅ ET mensual cargado: {len(df_et_mensual)} registros")
-else:
-    st.warning("⚠️ Sin datos de ET mensual")
 # ──── CARGAR DATOS DESDE FABRIC ────
 with st.spinner("Leyendo datos desde Fabric..."):
     try:
@@ -4412,7 +4433,11 @@ else:
 
 if tab_et is not None:
     with tab_et:
-        generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz, riesgos_et_cache)
+        generar_tab_et(
+            dia, forecasts_cache, dias_pred_ui,
+            modulos_kmz, riesgos_et_cache,
+            df_et_mensual=df_et_mensual
+        )
 
 with tab_datos:
     st.markdown("#### 📋 Tabla de datos diarios")
