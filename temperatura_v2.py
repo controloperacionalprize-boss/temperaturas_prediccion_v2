@@ -3866,34 +3866,29 @@ if normales_din is not None:
 else:
     MEDIA_TMAX2 = Q1_TMAX2 = Q3_TMAX2 = None
     MEDIA_TMIN2 = Q1_TMIN2 = Q3_TMIN2 = None
-# ──── CONEXIÓN A FABRIC (via st.secrets) ────
-# ══════════════════════════════════════════════════════════════
-# ✅ CONEXIÓN HÍBRIDA - LOCAL + STREAMLIT CLOUD
-# ══════════════════════════════════════════════════════════════
+    
 def conectar_fabric():
-    """Conecta a Fabric detectando si es local o Streamlit Cloud."""
+    """Conecta a Fabric con MSAL en local e cloud."""
     import os
     import pyodbc
+    import msal
     
     SQL_SERVER = st.secrets["SQL_SERVER"]
     SQL_DB = st.secrets["SQL_DB"]
     SQL_USER = st.secrets["SQL_USER"]
-    SQL_PASS = st.secrets["SQL_PASS"]
     
     # Detectar entorno
     es_streamlit_cloud = os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true"
     
-    if es_streamlit_cloud:
-        # ── STREAMLIT CLOUD: MSAL Device Code Flow ─────────────
-        try:
-            import msal
-            
-            st.info("🔐 Iniciando autenticación Azure AD (Device Code)...")
-            
-            app = msal.PublicClientApplication(
-                client_id="04b07795-8ddb-461a-bbee-02f9e1bf7b46",  # Azure CLI
-                authority="https://login.microsoftonline.com/common"
-            )
+    try:
+        app = msal.PublicClientApplication(
+            client_id="04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+            authority="https://login.microsoftonline.com/common"
+        )
+        
+        if es_streamlit_cloud:
+            # ── CLOUD: Device Code Flow ──────────────────────────
+            st.info("🔐 Autenticación Azure AD (Device Code)")
             
             flow = app.initiate_device_flow(
                 scopes=["https://database.windows.net/.default"]
@@ -3901,59 +3896,62 @@ def conectar_fabric():
             
             st.warning(
                 f"📱 **Abre este link en otro dispositivo:**\n\n"
-                f"{flow.get('verification_uri')}\n\n"
-                f"**Código:** `{flow.get('user_code')}`"
+                f"[{flow.get('verification_uri')}]({flow.get('verification_uri')})\n\n"
+                f"**Código:** `{flow.get('user_code')}`\n\n"
+                f"Esperando autenticación..."
             )
             
             result = app.acquire_token_by_device_flow(flow)
+        
+        else:
+            # ── LOCAL: Abre navegador automático ──────────────────
+            st.info("🌐 Abriendo navegador para autenticación...")
             
-            if "access_token" not in result:
-                st.error(f"❌ Autenticación fallida: {result.get('error_description')}")
-                return None
-            
-            connection_string = (
-                f'Driver={{ODBC Driver 17 for SQL Server}};'
-                f'Server={SQL_SERVER};'
-                f'Database={SQL_DB};'
-                f'UID={SQL_USER};'
-                f'PWD={SQL_PASS};'
-                f'Encrypt=yes;'
-                f'TrustServerCertificate=no;'
-                f'Connection Timeout=30;'
+            result = app.acquire_token_interactive(
+                scopes=["https://database.windows.net/.default"]
             )
-            
-        except ImportError:
-            st.error("❌ Falta `msal` en requirements.txt")
+        
+        # Verificar si obtuvo token
+        if "access_token" not in result:
+            error_msg = result.get('error_description', 'Token no obtenido')
+            st.error(f"❌ Autenticación fallida: {error_msg}")
             return None
-        except Exception as e:
-            st.error(f"❌ Error MSAL: {e}")
-            return None
-    
-    else:
-        # ── LOCAL: Autenticación interactiva Azure AD ─────────────
-        try:
-            connection_string = (
-                f'Driver={{ODBC Driver 17 for SQL Server}};'
-                f'Server={SQL_SERVER};'
-                f'Database={SQL_DB};'
-                f'Authentication=ActiveDirectoryInteractive;'
-                f'Encrypt=yes;'
-                f'Connection Timeout=30;'
-            )
-        except Exception as e:
-            st.error(f"❌ Error local: {e}")
-            return None
-    
-    # Conectar con la string
-    try:
+        
+        st.success("✅ Token obtenido correctamente")
+        
+        # Conectar a Fabric con credenciales
+        connection_string = (
+            f'Driver={{ODBC Driver 17 for SQL Server}};'
+            f'Server={SQL_SERVER};'
+            f'Database={SQL_DB};'
+            f'UID={SQL_USER};'
+            f'PWD={st.secrets["SQL_PASS"]};'
+            f'Encrypt=yes;'
+            f'TrustServerCertificate=no;'
+            f'Connection Timeout=30;'
+        )
+        
         conn = pyodbc.connect(connection_string)
-        st.success("✅ Conectado a Fabric")
+        st.success("✅ Conectado a Fabric SQL")
         return conn
+        
     except Exception as e:
-        st.error(f"❌ Error conexión: {e}")
+        st.error(f"❌ Error conexión: {str(e)}")
+        st.info(
+            "💡 **Soluciones:**\n"
+            "- Verifica que `msal` esté en requirements.txt\n"
+            "- En local: abre el navegador que aparezca\n"
+            "- En Cloud: sigue el código de dispositivo"
+        )
         return None
 
 
+# ── CONECTAR ──────────────────────────────────────────────────
+with st.spinner("Conectando a Fabric..."):
+    conn_fabric = conectar_fabric()
+    
+    if conn_fabric is None:
+        st.stop()
 # ── LLAMAR LA FUNCIÓN ────────────────────────────────────────
 with st.spinner("Conectando a Fabric..."):
     conn_fabric = conectar_fabric()
