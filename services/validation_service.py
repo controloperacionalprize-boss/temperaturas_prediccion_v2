@@ -9,7 +9,7 @@ import streamlit as st
 from prophet import Prophet
 from scipy.stats import norm
 
-from OPERACIONES.PREDICCION_TEMPERATURA.config.config import PROPHET_PARAMS, H_MAX_PENDIENTE
+from config.config import PROPHET_PARAMS, H_MAX_PENDIENTE
 from services.climatologia_service import calcular_climatologia_armonica, predecir_climatologia_armonica
 from services.enfen_service import obtener_ajuste_enfen
 from services.visualization_service import _fin_mes_prediccion, ajustar_prediccion_patron

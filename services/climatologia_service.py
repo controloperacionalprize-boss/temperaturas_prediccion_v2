@@ -4,7 +4,7 @@ from scipy.interpolate import CubicSpline
 
 import streamlit as st
 
-from OPERACIONES.PREDICCION_TEMPERATURA.config.config import PROPHET_PARAMS
+from config.config import PROPHET_PARAMS
 
 
 def calcular_climatologia_armonica(df_clim: pd.DataFrame, n_harmonics: int, halflife_anios: float) -> np.ndarray:

@@ -8,7 +8,7 @@ import streamlit as st
 import pyodbc
 import msal
 
-from OPERACIONES.PREDICCION_TEMPERATURA.config.config import (
+from config.config import (
     SHEET_NAME, MIN_REGISTROS, ROLLING_DIAS,
     TMAX_MIN, TMAX_MAX, TMIN_MIN, TMIN_MAX,
     DELTA_Q, MESES_RAW, DISTRITO_BUSCAR,

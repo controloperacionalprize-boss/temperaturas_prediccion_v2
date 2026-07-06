@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 import folium
 
-from OPERACIONES.PREDICCION_TEMPERATURA.config.config import (
+from config.config import (
     RIESGO_COLOR, RIESGO_COLOR_ET, COLORES_ET, COLORES_TEMP_SENAMHI,
     DIAS_ET_PROMEDIO, DIAS_RIESGO_VENTANA, MESES_RAW,
 )

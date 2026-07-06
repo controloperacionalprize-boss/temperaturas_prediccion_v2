@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 from prophet import Prophet
 
-from OPERACIONES.PREDICCION_TEMPERATURA.config.config import PROPHET_PARAMS, H_MAX_PENDIENTE, CACHE_DIR, CACHE_PKL, CACHE_HASH, CODE_VERSION
+from config.config import PROPHET_PARAMS, H_MAX_PENDIENTE, CACHE_DIR, CACHE_PKL, CACHE_HASH, CODE_VERSION
 from services.climatologia_service import calcular_climatologia_armonica, predecir_climatologia_armonica
 from services.enfen_service import obtener_ajuste_enfen
 

@@ -7,7 +7,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from scipy.ndimage import gaussian_filter1d
 
-from OPERACIONES.PREDICCION_TEMPERATURA.config.config import (
+from config.config import (
     GRID_COLOR, ROLLING_DIAS, Z_Q,
     BG_TMAX, BANDA_TMAX, CLIM_TMAX, REAL_TMAX_COLOR, PRED_COLOR_TMAX,
     BG_TMIN, BANDA_TMIN, CLIM_TMIN, REAL_TMIN_COLOR, PRED_COLOR_TMIN,

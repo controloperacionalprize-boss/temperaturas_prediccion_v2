@@ -9,7 +9,7 @@ try:
 except ImportError:
     REQUESTS_DISPONIBLE = False
 
-from OPERACIONES.PREDICCION_TEMPERATURA.config.config import AJUSTE_ENFEN, ENFEN_URL, ENFEN_CACHE_FILE
+from config.config import AJUSTE_ENFEN, ENFEN_URL, ENFEN_CACHE_FILE
 
 
 def obtener_ajuste_enfen(mes: int, anio: int, variable: str) -> float:
