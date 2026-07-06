@@ -3,3 +3,4 @@ temperatura_senamhi_aq1.py
 README_v2.md
 .streamlit/secrets.toml
 README.md
+.msal_token_cache.json
