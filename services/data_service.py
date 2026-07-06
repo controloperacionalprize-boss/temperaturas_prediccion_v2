@@ -382,8 +382,10 @@ def conectar_fabric():
     SQL_SERVER = st.secrets["SQL_SERVER"]
     SQL_DB     = st.secrets["SQL_DB"]
 
-    # En Windows siempre es local, DISPLAY es solo Linux/Mac
-    en_cloud = "STREAMLIT_CLOUD" in os.environ
+    # En Windows siempre es local (login interactivo con navegador). En Streamlit
+    # Cloud el contenedor es Linux y no tiene navegador/pantalla, así que ahí se
+    # necesita el device flow (mostrar el código para autorizar desde otro dispositivo).
+    en_cloud = os.name != "nt"
 
     app, cache = _get_msal_app()
 
