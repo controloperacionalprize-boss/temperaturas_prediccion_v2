@@ -385,9 +385,6 @@ def conectar_fabric():
     SQL_SERVER = st.secrets["SQL_SERVER"]
     SQL_DB     = st.secrets["SQL_DB"]
 
-    # En Windows siempre es local (login interactivo con navegador). En Streamlit
-    # Cloud el contenedor es Linux y no tiene navegador/pantalla, así que ahí se
-    # necesita el device flow (mostrar el código para autorizar desde otro dispositivo).
     en_cloud = os.name != "nt"
 
     app, cache = _get_msal_app()
@@ -395,7 +392,6 @@ def conectar_fabric():
     try:
         result = None
 
-        # ── Token silencioso (refresh token desde disco) ──────
         cuentas = app.get_accounts()
         if cuentas:
             result = app.acquire_token_silent(
@@ -404,7 +400,6 @@ def conectar_fabric():
             )
             _guardar_token_cache(cache)
 
-        # ── Si no hay token válido, pedir uno nuevo ───────────
         if result is None or "access_token" not in result:
             if en_cloud:
                 flow = app.initiate_device_flow(
