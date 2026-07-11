@@ -11,6 +11,7 @@ markdown-it-py>=2.2.0
 rich>=13.0.0
 lxml>=4.9.0
 pyodbc>=5.0.0
+sqlalchemy>=2.0.0
 requests>=2.31.0
 folium>=0.14.0
 shapely>=2.0.0

@@ -7,6 +7,8 @@ import pandas as pd
 import streamlit as st
 import pyodbc
 import msal
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL as SAUrl
 
 from config.config import (
     SHEET_NAME, MIN_REGISTROS, ROLLING_DIAS,
@@ -363,7 +365,7 @@ def _conectar_sql_directo():
         SQL_USER   = st.secrets["SQL_USER"]
         SQL_PASS   = st.secrets["SQL_PASS"]
 
-        connection_string = (
+        odbc_str = (
             f"Driver={{ODBC Driver 17 for SQL Server}};"
             f"Server={SQL_SERVER};"
             f"Database={SQL_DB};"
@@ -372,7 +374,8 @@ def _conectar_sql_directo():
             f"Encrypt=yes;"
             f"Connection Timeout=15;"
         )
-        return pyodbc.connect(connection_string)
+        url = SAUrl.create("mssql+pyodbc", query={"odbc_connect": odbc_str})
+        return create_engine(url, fast_executemany=True)
     except Exception as e:
         st.error(f"❌ No se pudo conectar a Fabric: {e}")
         return None
@@ -435,10 +438,11 @@ def conectar_fabric():
             f"TrustServerCertificate=no;"
             f"Connection Timeout=30;"
         )
-        return pyodbc.connect(
+        creator = lambda: pyodbc.connect(  # noqa: E731
             connection_string,
             attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}
         )
+        return create_engine("mssql+pyodbc://", creator=creator, fast_executemany=True)
 
     except Exception:
         return _conectar_sql_directo()
