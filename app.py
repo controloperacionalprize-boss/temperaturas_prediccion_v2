@@ -66,11 +66,11 @@ with st.sidebar:
         st.caption("⚠️ No se pudo verificar ENFEN (sin conexión o cambió el formato de la página).")
     else:
         ultimo_visto = _leer_ultimo_visto_enfen()
+        try:
+            from config.config import ENFEN_URL
+        except Exception:
+            ENFEN_URL = None
         if comunicado_actual['id'] != ultimo_visto.get('id'):
-            try:
-                from config.config import ENFEN_URL
-            except Exception:
-                ENFEN_URL = None
             st.warning(
                 f"📢 **Nuevo comunicado ENFEN**\n\n"
                 f"N°{comunicado_actual['numero']}-{comunicado_actual['anio']} "
