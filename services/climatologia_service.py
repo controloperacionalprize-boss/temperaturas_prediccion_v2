@@ -64,3 +64,28 @@ def spline_diario_cached(fecha_inicio_str: str, fecha_fin_str: str,
     x_eval = (rango - fechas_ctrl[0]).days.values.astype(float)
 
     return pd.DataFrame({'Fecha': rango, 'Valor': cs(x_eval).round(2)})
+
+
+def generar_climatologia_diaria_anual(anio: int,
+                                      media_tmax, q1_tmax, q3_tmax,
+                                      media_tmin, q1_tmin, q3_tmin) -> pd.DataFrame:
+    """Climatología SENAMHI (12 normales mensuales) interpolada día a día para
+    todo un año calendario, vía el mismo spline cúbico que dibuja el gráfico."""
+    fecha_ini = pd.Timestamp(year=anio, month=1, day=1).strftime('%Y-%m-%d')
+    fecha_fin = pd.Timestamp(year=anio, month=12, day=31).strftime('%Y-%m-%d')
+
+    tmax_media = spline_diario_cached(fecha_ini, fecha_fin, tuple(media_tmax))
+    tmax_q1    = spline_diario_cached(fecha_ini, fecha_fin, tuple(q1_tmax))
+    tmax_q3    = spline_diario_cached(fecha_ini, fecha_fin, tuple(q3_tmax))
+    tmin_media = spline_diario_cached(fecha_ini, fecha_fin, tuple(media_tmin))
+    tmin_q1    = spline_diario_cached(fecha_ini, fecha_fin, tuple(q1_tmin))
+    tmin_q3    = spline_diario_cached(fecha_ini, fecha_fin, tuple(q3_tmin))
+
+    tabla = tmax_media.rename(columns={'Valor': 'Tmax_media'})
+    tabla['Tmax_Q1']    = tmax_q1['Valor']
+    tabla['Tmax_Q3']    = tmax_q3['Valor']
+    tabla['Tmin_media'] = tmin_media['Valor']
+    tabla['Tmin_Q1']    = tmin_q1['Valor']
+    tabla['Tmin_Q3']    = tmin_q3['Valor']
+    tabla['Fecha']      = tabla['Fecha'].dt.strftime('%Y/%m/%d')
+    return tabla

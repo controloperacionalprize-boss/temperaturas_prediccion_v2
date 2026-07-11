@@ -12,7 +12,6 @@ from scipy.stats import norm
 from config.config import PROPHET_PARAMS, H_MAX_PENDIENTE
 from services.climatologia_service import calcular_climatologia_armonica, predecir_climatologia_armonica
 from services.enfen_service import obtener_ajuste_enfen
-from services.visualization_service import _fin_mes_prediccion, ajustar_prediccion_patron
 
 
 def _score_combo(sub_fundo: pd.DataFrame, variable: str, ventana: dict, params_combo: dict):
@@ -243,10 +242,12 @@ def _forecast_mes_walkforward(sub_fundo: pd.DataFrame, variable: str,
     return pred_periodo[['ds', variable]]
 
 
-def generar_export_prediccion_historica(dia: pd.DataFrame, forecasts_cache: dict) -> pd.DataFrame:
+def generar_export_prediccion_historica(dia: pd.DataFrame) -> pd.DataFrame:
     """Tabla plana (Empresa, Fundo, Fecha, Tmax, Tmin, Tipo='Predicho') con walk-forward
-    para los últimos 3 meses cerrados (entrenando cada uno sin ver su propio mes) más la
-    predicción vigente del mes en curso, tomada del mismo caché que usa el gráfico."""
+    puro para los últimos 3 meses cerrados MÁS el mes en curso: cada uno de los 4 meses
+    se entrena solo con datos reales hasta el día antes de que empiece ese mes, sin ver
+    ni un día del mes que predice — incluido el mes en curso, aunque ya haya días reales
+    transcurridos de él (se ignoran a propósito, todo sale como predicción del modelo)."""
     fundos = dia['Fundo'].unique().tolist()
     filas  = []
 
@@ -261,8 +262,8 @@ def generar_export_prediccion_historica(dia: pd.DataFrame, forecasts_cache: dict
 
         piezas = {'Tmax': [], 'Tmin': []}
 
-        # ── 3 meses cerrados anteriores al mes en curso ──────────
-        for k in range(3, 0, -1):
+        # ── 3 meses cerrados + el mes en curso (k=0), todos walk-forward puro ──
+        for k in range(3, -1, -1):
             mes_ini = (mes_actual_ini - pd.DateOffset(months=k)).replace(day=1)
             mes_fin = pd.Timestamp(
                 year=mes_ini.year, month=mes_ini.month,
@@ -274,24 +275,6 @@ def generar_export_prediccion_historica(dia: pd.DataFrame, forecasts_cache: dict
                 res = _forecast_mes_walkforward(sub, variable, mes_ini, mes_fin, fecha_corte)
                 if not res.empty:
                     piezas[variable].append(res)
-
-        # ── Mes en curso: la misma predicción vigente del gráfico ─
-        primer_dia_actual, ultimo_dia_actual = _fin_mes_prediccion(fecha_max)
-        primer_dia_pred = fecha_max + pd.Timedelta(days=1)
-
-        for variable in ('Tmax', 'Tmin'):
-            cache_entry = forecasts_cache.get((fundo, variable), {})
-            forecast_v  = cache_entry.get('forecast', pd.DataFrame())
-            if forecast_v.empty:
-                continue
-            forecast_v = forecast_v.copy()
-            forecast_v['ds'] = pd.to_datetime(forecast_v['ds']).dt.tz_localize(None).dt.normalize()
-            pred_v = forecast_v[
-                (forecast_v['ds'] >= primer_dia_pred) & (forecast_v['ds'] <= ultimo_dia_actual)
-            ][['ds', 'yhat', 'yhat_lower', 'yhat_upper']].reset_index(drop=True)
-            pred_v = ajustar_prediccion_patron(pred_v, sub, variable)
-            if not pred_v.empty:
-                piezas[variable].append(pred_v[['ds', 'yhat']].rename(columns={'yhat': variable}))
 
         tmax_df = pd.concat(piezas['Tmax'], ignore_index=True) if piezas['Tmax'] else pd.DataFrame(columns=['ds', 'Tmax'])
         tmin_df = pd.concat(piezas['Tmin'], ignore_index=True) if piezas['Tmin'] else pd.DataFrame(columns=['ds', 'Tmin'])

@@ -39,7 +39,8 @@ from services.prophet_service import (
 )
 from services.visualization_service import generar_figura, generar_tab_et
 from services.validation_service import generar_seccion_validacion, generar_export_prediccion_historica
-from services.export_service import exportar_excel_prediccion
+from services.export_service import exportar_excel_tabla
+from services.climatologia_service import generar_climatologia_diaria_anual
 
 st.markdown(MAIN_CSS, unsafe_allow_html=True)
 
@@ -536,27 +537,33 @@ with tab_datos:
     st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
     st.markdown("#### ⬇️ Descargas")
     st.caption(
-        "La predicción exportable cubre los últimos 3 meses cerrados, reconstruidos con "
-        "walk-forward (cada mes entrenado sin ver sus propios datos), más el mes en curso "
-        "con la misma predicción vigente del gráfico."
+        "La predicción exportable cubre los últimos 3 meses cerrados más el mes en curso, "
+        "los 4 reconstruidos con walk-forward puro: cada mes se entrena solo con datos "
+        "reales hasta el día antes de que empiece, sin ver ni un día de ese mes (Tipo="
+        "'Predicho' en todas las filas, incluso donde ya existe dato real)."
     )
 
     if st.button("🔄 Generar predicción histórica para exportar"):
-        with st.spinner("Entrenando walk-forward (3 meses cerrados) por fundo/variable..."):
-            st.session_state['df_pred_export'] = generar_export_prediccion_historica(dia, forecasts_cache)
+        with st.spinner("Entrenando walk-forward (4 meses) por fundo/variable..."):
+            st.session_state['df_pred_export'] = generar_export_prediccion_historica(dia)
 
     df_pred_export = st.session_state.get('df_pred_export', pd.DataFrame())
     df_hist_all    = pd.concat([df_tmax_hist, df_tmin_hist], ignore_index=True)
     if not df_hist_all.empty:
         df_hist_all['Fecha'] = pd.to_datetime(df_hist_all['Fecha']).dt.strftime('%Y/%m/%d')
 
-    col_d1, col_d2, col_d3 = st.columns(3)
+    anio_clima  = pd.Timestamp.today().year
+    df_clima_anual = generar_climatologia_diaria_anual(
+        anio_clima, MEDIA_TMAX, Q1_TMAX, Q3_TMAX, MEDIA_TMIN, Q1_TMIN, Q3_TMIN
+    )
+
+    col_d1, col_d2, col_d3, col_d4 = st.columns(4)
 
     with col_d1:
         if not df_pred_export.empty:
             st.download_button(
                 label="📥 Excel predicción (walk-forward)",
-                data=exportar_excel_prediccion(df_pred_export),
+                data=exportar_excel_tabla(df_pred_export, 'Prediccion'),
                 file_name="Prediccion_walkforward_Aquanqa.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
@@ -581,6 +588,14 @@ with tab_datos:
                 mime="text/csv",
                 use_container_width=True
             )
+    with col_d4:
+        st.download_button(
+            label=f"📥 Excel climatología diaria {anio_clima}",
+            data=exportar_excel_tabla(df_clima_anual, 'Climatologia'),
+            file_name=f"Climatologia_SENAMHI_diaria_{anio_clima}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
 st.markdown("""
 <div class="footer-note">
