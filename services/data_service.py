@@ -1,14 +1,10 @@
 import io
 import json
 import os
-import struct
 
 import pandas as pd
 import streamlit as st
-import pyodbc
-import msal
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import URL as SAUrl
+from sqlalchemy import create_engine
 
 from config.config import (
     SHEET_NAME, MIN_REGISTROS, ROLLING_DIAS,
@@ -332,120 +328,26 @@ def cargar_geojson_peru() -> dict | None:
         return None
 
 
-# ── Conexión Fabric ────────────────────────────────────────────
-_TOKEN_CACHE_PATH = os.path.join(os.path.dirname(__file__), '..', 'assets', '.msal_token_cache.json')
+# ── Conexión PostgreSQL ────────────────────────────────────────
 
-
-def _get_msal_app():
-    """Crea app MSAL con caché persistente en disco."""
-    cache = msal.SerializableTokenCache()
-
-    if os.path.exists(_TOKEN_CACHE_PATH):
-        with open(_TOKEN_CACHE_PATH, 'r') as f:
-            cache.deserialize(f.read())
-
-    app = msal.PublicClientApplication(
-        client_id="04b07795-8ddb-461a-bbee-02f9e1bf7b46",
-        authority="https://login.microsoftonline.com/common",
-        token_cache=cache
-    )
-    return app, cache
-
-
-def _guardar_token_cache(cache: msal.SerializableTokenCache):
-    if cache.has_state_changed:
-        with open(_TOKEN_CACHE_PATH, 'w') as f:
-            f.write(cache.serialize())
-
-
-def _conectar_sql_directo():
-    try:
-        SQL_SERVER = st.secrets["SQL_SERVER"]
-        SQL_DB     = st.secrets["SQL_DB"]
-        SQL_USER   = st.secrets["SQL_USER"]
-        SQL_PASS   = st.secrets["SQL_PASS"]
-
-        odbc_str = (
-            f"Driver={{ODBC Driver 17 for SQL Server}};"
-            f"Server={SQL_SERVER};"
-            f"Database={SQL_DB};"
-            f"UID={SQL_USER};"
-            f"PWD={SQL_PASS};"
-            f"Encrypt=yes;"
-            f"Connection Timeout=15;"
-        )
-        url = SAUrl.create("mssql+pyodbc", query={"odbc_connect": odbc_str})
-        return create_engine(url, fast_executemany=True)
-    except Exception as e:
-        st.error(f"❌ No se pudo conectar a Fabric: {e}")
-        return None
-
-
-def conectar_fabric():
-    SQL_SERVER = st.secrets["SQL_SERVER"]
-    SQL_DB     = st.secrets["SQL_DB"]
-
-    en_cloud = os.name != "nt"
-
-    app, cache = _get_msal_app()
-
-    try:
-        result = None
-
-        cuentas = app.get_accounts()
-        if cuentas:
-            result = app.acquire_token_silent(
-                scopes=["https://database.windows.net/.default"],
-                account=cuentas[0]
-            )
-            _guardar_token_cache(cache)
-
-        if result is None or "access_token" not in result:
-            if en_cloud:
-                flow = app.initiate_device_flow(
-                    scopes=["https://database.windows.net/.default"]
-                )
-                st.info(
-                    f"📱 Ve a [{flow.get('verification_uri')}]({flow.get('verification_uri')}) "
-                    f"e ingresa el código: `{flow.get('user_code')}`"
-                )
-                with st.spinner("Esperando autorización..."):
-                    result = app.acquire_token_by_device_flow(flow)
-            else:
-                result = app.acquire_token_interactive(
-                    scopes=["https://database.windows.net/.default"],
-                    prompt="select_account"
-                )
-            _guardar_token_cache(cache)
-
-        if "access_token" not in result:
-            return _conectar_sql_directo()
-
-        token_bytes  = result["access_token"].encode("utf-16-le")
-        token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
-        SQL_COPT_SS_ACCESS_TOKEN = 1256
-
-        connection_string = (
-            f"Driver={{ODBC Driver 17 for SQL Server}};"
-            f"Server={SQL_SERVER};"
-            f"Database={SQL_DB};"
-            f"Encrypt=yes;"
-            f"TrustServerCertificate=no;"
-            f"Connection Timeout=30;"
-        )
-        creator = lambda: pyodbc.connect(  # noqa: E731
-            connection_string,
-            attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}
-        )
-        return create_engine("mssql+pyodbc://", creator=creator, fast_executemany=True)
-
-    except Exception:
-        return _conectar_sql_directo()
+def _crear_engine_pg():
+    host = st.secrets["PG_HOST"]
+    port = st.secrets["PG_PORT"]
+    db   = st.secrets["PG_DB"]
+    user = st.secrets["PG_USER"]
+    pwd  = st.secrets["PG_PASS"]
+    url  = f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}"
+    return create_engine(url, connect_args={"connect_timeout": 15})
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
 def get_conn_fabric():
-    return conectar_fabric()
+    try:
+        return _crear_engine_pg()
+    except Exception as e:
+        st.error(f"❌ No se pudo conectar a PostgreSQL: {e}")
+        return None
+
 
 def ejecutar_query(query: str) -> pd.DataFrame:
     """Ejecuta una query con reconexión automática en caso de fallo."""
@@ -458,11 +360,9 @@ def ejecutar_query(query: str) -> pd.DataFrame:
             return pd.read_sql(query, conn)
         except Exception as e:
             err = str(e)
-            # Si el error es de conexión caída o link failure...
-            if '08S01' in err or 'Communication link failure' in err or 'TCP Provider' in err:
+            if 'connection' in err.lower() or 'timeout' in err.lower():
                 if intento < 2:
-                    get_conn_fabric.clear() 
-                    
+                    get_conn_fabric.clear()
                     time.sleep(2)
                     continue
             raise
@@ -471,9 +371,23 @@ def ejecutar_query(query: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_datos_clima(_conn_fabric) -> pd.DataFrame:
-    """Carga la vista vw_Clima completa. Cacheada para que un rerun de Streamlit
-    (ej. al presionar cualquier botón de la página) no repita la consulta a Fabric."""
-    return pd.read_sql("SELECT * FROM [dbo].[vw_Clima]", _conn_fabric)
+    """Carga la vista vw_clima completa y normaliza nombres de columnas."""
+    df = pd.read_sql("""
+        SELECT empresa, fundo, fecha_hora, temp_alta_c, temp_baja_c,
+               et_mm, rad_solar_alta_wm2, rad_solar_wm2
+        FROM public.rpt_climatologia_prize
+    """, _conn_fabric)
+    df = df.rename(columns={
+        "empresa":            "Empresa",
+        "fundo":              "Fundo",
+        "fecha_hora":         "Fecha-Hora",
+        "temp_alta_c":        "TempAlta-C",
+        "temp_baja_c":        "TempBaja-C",
+        "et_mm":              "ET-mm",
+        "rad_solar_wm2":      "RadSolar-W/m2",
+        "rad_solar_alta_wm2": "RadSolarAlta-W/m2",
+    })
+    return df
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -481,24 +395,26 @@ def cargar_et_mensual_promedio(_conn_fabric) -> pd.DataFrame:
     """Carga ET promedio diario mensual por fundo desde Fabric."""
     try:
         query = """
-        WITH EtoMensual AS (
+        WITH base AS (
             SELECT
-                Fundo,
-                YEAR(TRY_CONVERT(date,[Fecha-Hora])) AS Anio,
-                MONTH(TRY_CONVERT(date,[Fecha-Hora])) AS Mes,
-                SUM([ET-mm]) AS EToMensual,
-                COUNT(DISTINCT TRY_CONVERT(date,[Fecha-Hora])) AS DiasConDatos
-            FROM [dbo].[Clima]
-            WHERE TRY_CONVERT(date,[Fecha-Hora]) IS NOT NULL
-            GROUP BY Fundo, YEAR(TRY_CONVERT(date,[Fecha-Hora])), MONTH(TRY_CONVERT(date,[Fecha-Hora]))
+                fundo,
+                EXTRACT(YEAR  FROM fecha_hora::date) AS anio,
+                EXTRACT(MONTH FROM fecha_hora::date) AS mes,
+                SUM(et_mm)                           AS eto_mensual,
+                COUNT(DISTINCT fecha_hora::date)     AS dias_con_datos
+            FROM public.rpt_climatologia_prize
+            WHERE fecha_hora IS NOT NULL
+            GROUP BY fundo,
+                     EXTRACT(YEAR  FROM fecha_hora::date),
+                     EXTRACT(MONTH FROM fecha_hora::date)
         )
         SELECT
-            Fundo,
-            Mes,
-            ROUND(AVG(EToMensual * 1.0 / DiasConDatos),2) AS EToPromedioDiaria
-        FROM EtoMensual
-        GROUP BY Fundo, Mes
-        ORDER BY Fundo, Mes
+            fundo AS "Fundo",
+            mes   AS "Mes",
+            ROUND(AVG(eto_mensual * 1.0 / dias_con_datos)::numeric, 2) AS "EToPromedioDiaria"
+        FROM base
+        GROUP BY fundo, mes
+        ORDER BY fundo, mes
         """
         return pd.read_sql(query, _conn_fabric)
     except Exception as e:

@@ -63,11 +63,6 @@ MESES_RAW = [
 DISTRITO_BUSCAR  = 'GUADALUPE'
 DISTRITO_NINGUNA = '— Ninguna —'
 
-# ── ENFEN ──────────────────────────────────────────────────────
-# Sin ajustes calibrados todavía: obtener_ajuste_enfen() devuelve 0.0 por defecto.
-AJUSTE_ENFEN = {}
-ENFEN_URL        = "https://enfen.imarpe.gob.pe/comunicados/"
-ENFEN_CACHE_FILE = Path(_APP_DIR) / "assets" / "enfen_ultimo_visto.json"
 
 # ── Mapa / riesgo ──────────────────────────────────────────────
 COLORES_TEMP_SENAMHI = [

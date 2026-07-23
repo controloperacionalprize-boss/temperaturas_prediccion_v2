@@ -527,20 +527,24 @@ def generar_tab_et(dia: pd.DataFrame, forecasts_cache: dict, dias_pred_ui: int,
                 fig.add_trace(go.Scatter(
                     x=[et_real['Fecha'].iloc[-1], pred_et['ds'].iloc[0]],
                     y=[float(et_real['ET_smooth'].iloc[-1]), float(pred_et['yhat'].iloc[0])],
-                    mode='lines', line=dict(color='#43A047', width=1.8, dash='dash'),
+                    mode='lines', line=dict(color='#43A047', width=1.8, dash='dot'),
                     showlegend=False, hoverinfo='skip'
                 ), row=row, col=1)
                 fig.add_trace(go.Scatter(
-                    x=pred_et['ds'].tolist() + pred_et['ds'].tolist()[::-1],
-                    y=pred_et['yhat_upper'].tolist() + pred_et['yhat_lower'].tolist()[::-1],
-                    fill='toself', fillcolor='rgba(67, 160, 71, 0.12)',
-                    line=dict(color='rgba(0,0,0,0)'), showlegend=False, hoverinfo='skip'
+                    x=pred_et['ds'].tolist(), y=pred_et['yhat_lower'].tolist(),
+                    mode='lines', line=dict(width=0, color='rgba(0,0,0,0)'),
+                    showlegend=False, hoverinfo='skip'
                 ), row=row, col=1)
                 fig.add_trace(go.Scatter(
-                    x=pred_et['ds'], y=pred_et['yhat'],
-                    mode='lines+markers', line=dict(color='#43A047', width=2.5, dash='dash'),
-                    marker=dict(size=4, color='#43A047'),
-                    name='ET predicha', showlegend=(i == 0),
+                    x=pred_et['ds'].tolist(), y=pred_et['yhat_upper'].tolist(),
+                    mode='lines', line=dict(width=0, color='rgba(0,0,0,0)'),
+                    fill='tonexty', fillcolor='rgba(67,160,71,0.20)',
+                    showlegend=False, hoverinfo='skip'
+                ), row=row, col=1)
+                fig.add_trace(go.Scatter(
+                    x=pred_et['ds'].tolist(), y=pred_et['yhat'].tolist(),
+                    mode='lines', line=dict(color='#43A047', width=1.8, dash='dot'),
+                    showlegend=(i == 0), name='ET predicha',
                     hovertemplate='%{x|%d/%b/%Y}<br>ET pred: %{y:.2f} mm<extra>Prophet</extra>'
                 ), row=row, col=1)
                 fig.add_annotation(
@@ -672,28 +676,31 @@ def generar_tab_rad(dia: pd.DataFrame, forecasts_cache: dict, dias_pred_ui: int,
 
             if not pred_rad.empty:
                 # ── Banda IC predicción ────────────────────────
-                fig.add_trace(go.Scatter(
-                    x=pred_rad['ds'].tolist() + pred_rad['ds'].tolist()[::-1],
-                    y=pred_rad['yhat_upper'].tolist() + pred_rad['yhat_lower'].tolist()[::-1],
-                    fill='toself', fillcolor='rgba(230,81,0,0.12)',
-                    line=dict(color='rgba(0,0,0,0)'),
-                    showlegend=False, hoverinfo='skip',
-                ), row=row, col=1)
-
                 # ── Línea conector ─────────────────────────────
                 fig.add_trace(go.Scatter(
                     x=[rad_real['Fecha'].iloc[-1], pred_rad['ds'].iloc[0]],
                     y=[float(rad_real['RadSolarAlta_smooth'].iloc[-1]), float(pred_rad['yhat'].iloc[0])],
-                    mode='lines', line=dict(color='#E65100', width=1.5, dash='dash'),
+                    mode='lines', line=dict(color='rgba(230,81,0,0.70)', width=1.5, dash='dot'),
+                    showlegend=False, hoverinfo='skip',
+                ), row=row, col=1)
+
+                # ── Banda IC ───────────────────────────────────
+                fig.add_trace(go.Scatter(
+                    x=pred_rad['ds'].tolist(), y=pred_rad['yhat_lower'].tolist(),
+                    mode='lines', line=dict(width=0, color='rgba(0,0,0,0)'),
+                    showlegend=False, hoverinfo='skip',
+                ), row=row, col=1)
+                fig.add_trace(go.Scatter(
+                    x=pred_rad['ds'].tolist(), y=pred_rad['yhat_upper'].tolist(),
+                    mode='lines', line=dict(width=0, color='rgba(0,0,0,0)'),
+                    fill='tonexty', fillcolor='rgba(230,81,0,0.20)',
                     showlegend=False, hoverinfo='skip',
                 ), row=row, col=1)
 
                 # ── Línea predicción ───────────────────────────
                 fig.add_trace(go.Scatter(
-                    x=pred_rad['ds'], y=pred_rad['yhat'],
-                    mode='lines+markers',
-                    line=dict(color='#E65100', width=2.0, dash='dash'),
-                    marker=dict(size=4, color='#E65100'),
+                    x=pred_rad['ds'].tolist(), y=pred_rad['yhat'].tolist(),
+                    mode='lines', line=dict(color='rgba(230,81,0,0.70)', width=1.8, dash='dot'),
                     showlegend=(i == 0), name='RadSolarAlta predicha',
                     hovertemplate='%{x|%d/%b/%Y}<br>Rad Máx pred: %{y:.0f} W/m²<extra>Prophet</extra>',
                 ), row=row, col=1)

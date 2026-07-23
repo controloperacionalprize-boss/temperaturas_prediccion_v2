@@ -116,14 +116,9 @@ def download_kmz_from_github() -> bytes | None:
             req  = urllib.request.Request(url, headers=headers)
             resp = urllib.request.urlopen(req, timeout=30)
             return resp.read()
-        except urllib.error.HTTPError as e:
-            st.write(f"❌ HTTP {e.code}: {url}")
-        except urllib.error.URLError as e:
-            st.write(f"❌ URL Error: {e.reason}")
-        except Exception as e:
-            st.write(f"❌ Error: {str(e)}")
+        except (urllib.error.HTTPError, urllib.error.URLError, Exception):
+            continue
 
-    st.error("❌ No se pudo descargar KMZ desde GitHub")
     return None
 
 

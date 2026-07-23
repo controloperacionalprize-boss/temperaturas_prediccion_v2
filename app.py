@@ -21,9 +21,7 @@ from config.config import (
     MIN_REGISTROS, DISTRITO_BUSCAR, DISTRITO_NINGUNA, MESES_RAW,
 )
 from styles.styles import MAIN_CSS
-from services.enfen_service import (
-    chequear_comunicado_enfen, _leer_ultimo_visto_enfen, _guardar_ultimo_visto_enfen,
-)
+
 from services.data_service import (
     _leer_normales_desde_disco, cargar_catalogo_normales, cargar_normales_dinamico,
     obtener_distritos_senamhi, cargar_temperaturas_distritos,
@@ -58,36 +56,6 @@ if norm_bytes_sidebar:
         print(f"❌ No es ZIP válido: {e}")
 else:
     print("❌ norm_bytes_sidebar es None")
-with st.sidebar:
-    st.markdown("### 🌊 Monitor ENFEN")
-    comunicado_actual = chequear_comunicado_enfen()
-
-    if comunicado_actual is None:
-        st.caption("⚠️ No se pudo verificar ENFEN (sin conexión o cambió el formato de la página).")
-    else:
-        ultimo_visto = _leer_ultimo_visto_enfen()
-        try:
-            from config.config import ENFEN_URL
-        except Exception:
-            ENFEN_URL = None
-        if comunicado_actual['id'] != ultimo_visto.get('id'):
-            st.warning(
-                f"📢 **Nuevo comunicado ENFEN**\n\n"
-                f"N°{comunicado_actual['numero']}-{comunicado_actual['anio']} "
-                f"({comunicado_actual['fecha']})\n\n"
-                f"Revisa si `AJUSTE_ENFEN` necesita actualizarse."
-            )
-            st.markdown(f"[📄 Ver comunicados ENFEN]({ENFEN_URL})")
-            if st.button("✅ Marcar como revisado"):
-                _guardar_ultimo_visto_enfen(comunicado_actual)
-                st.rerun()
-        else:
-            st.caption(
-                f"✅ Al día — último: N°{comunicado_actual['numero']}-{comunicado_actual['anio']} "
-                f"({comunicado_actual['fecha']})"
-            )
-            st.markdown(f"[📄 Ver comunicados ENFEN]({ENFEN_URL or '#'})")
-
 with st.sidebar:
     st.markdown("## ⚙️ CONFIGURACIÓN")
 

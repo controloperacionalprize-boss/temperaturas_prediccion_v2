@@ -857,7 +857,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui):
                     x=[et_real['Fecha'].iloc[-1], pred_et['ds'].iloc[0]],
                     y=[et_val_ultimo, float(pred_et['yhat'].iloc[0])],
                     mode='lines',
-                    line=dict(color='#43A047', width=1.8, dash='dash'),
+                    line=dict(color='#43A047', width=1.8, dash='dot'),
                     showlegend=False, hoverinfo='skip'
                 ), row=row, col=1)
 
@@ -876,7 +876,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui):
                     x=pred_et['ds'],
                     y=pred_et['yhat'],
                     mode='lines+markers',
-                    line=dict(color='#43A047', width=2.5, dash='dash'),
+                    line=dict(color='#43A047', width=2.5, dash='dot'),
                     marker=dict(size=4, color='#43A047'),
                     name='ET predicha',
                     showlegend=(i == 0),

@@ -11,7 +11,7 @@ from scipy.stats import norm
 
 from config.config import PROPHET_PARAMS, H_MAX_PENDIENTE
 from services.climatologia_service import calcular_climatologia_armonica, predecir_climatologia_armonica
-from services.enfen_service import obtener_ajuste_enfen
+
 
 
 def _score_combo(sub_fundo: pd.DataFrame, variable: str, ventana: dict, params_combo: dict):
@@ -108,8 +108,7 @@ def _score_combo(sub_fundo: pd.DataFrame, variable: str, ventana: dict, params_c
     comp = comp.copy()
     comp['h'] = (comp['ds'] - pd.Timestamp(fecha_corte)).dt.days
     h_ef = np.minimum(comp['h'].clip(lower=0), H_MAX_PENDIENTE)
-    comp['ajuste_enfen'] = comp['ds'].apply(lambda f: obtener_ajuste_enfen(f.month, f.year, variable))
-    comp['bias_h']   = a_int + b_slope * (len(ult) - 1) + b_slope * h_ef + bias_est + comp['ajuste_enfen']
+    comp['bias_h'] = a_int + b_slope * (len(ult) - 1) + b_slope * h_ef + bias_est
     comp['pred_corr'] = comp['yhat'] + comp['bias_h']
     comp['error']     = comp['Real'] - comp['pred_corr']
 
@@ -429,12 +428,9 @@ def _validar_ventana(variable: str, dia: pd.DataFrame, ventana: dict, key_suffix
         comparacion['h'] = (comparacion['Fecha'] - fecha_corte_dt).dt.days
         h_efectivo = np.minimum(comparacion['h'].clip(lower=0), H_MAX_PENDIENTE)
 
-        comparacion['ajuste_enfen'] = comparacion['Fecha'].apply(
-            lambda f: obtener_ajuste_enfen(f.month, f.year, variable)
-        )
         comparacion['bias_h'] = (
             a_int + b_slope * (len(ult) - 1) + b_slope * h_efectivo
-            + bias_estacional + comparacion['ajuste_enfen']
+            + bias_estacional
         )
 
         mbe_sin_correccion = (comparacion['Real'] - comparacion['Pred']).mean()
@@ -447,14 +443,12 @@ def _validar_ventana(variable: str, dia: pd.DataFrame, ventana: dict, key_suffix
         st.caption(
             f"🩺 Diagnóstico MBE — sin corrección: {mbe_sin_correccion:+.2f}°C | "
             f"+tendencia: {mbe_solo_tendencia:+.2f}°C | "
-            f"+estacional: {mbe_tend_estacional:+.2f}°C | "
-            f"+ENFEN (final): -- (ver MBE abajo)"
+            f"+estacional: {mbe_tend_estacional:+.2f}°C"
         )
         st.caption(
             f"🔍 Componentes del bias — tendencia (a_int)={a_int:.2f}°C, "
             f"pendiente·h promedio={float((b_slope * h_efectivo).mean()):.2f}°C, "
-            f"estacional={bias_estacional:.2f}°C, "
-            f"ajuste ENFEN promedio={comparacion['ajuste_enfen'].mean():+.2f}°C "
+            f"estacional={bias_estacional:.2f}°C "
             f"→ bias_h promedio={comparacion['bias_h'].mean():.2f}°C"
         )
 

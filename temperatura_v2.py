@@ -3414,7 +3414,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
 
             fig.add_hline(
                 y=q1,
-                line=dict(color='#B3E5FC', width=1, dash='dash'),
+                line=dict(color='#B3E5FC', width=1, dash='dot'),
                 annotation_text=f"Q1: {q1:.2f}",
                 annotation_position="right",
                 annotation_font=dict(size=7, color='#0288D1'),
@@ -3422,7 +3422,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
             )
             fig.add_hline(
                 y=q3,
-                line=dict(color='#01579B', width=1, dash='dash'),
+                line=dict(color='#01579B', width=1, dash='dot'),
                 annotation_text=f"Q3: {q3:.2f}",
                 annotation_position="right",
                 annotation_font=dict(size=7, color='#01579B'),
@@ -3499,7 +3499,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                     x=[et_real['Fecha'].iloc[-1], pred_et['ds'].iloc[0]],
                     y=[float(et_real['ET_smooth'].iloc[-1]), float(pred_et['yhat'].iloc[0])],
                     mode='lines',
-                    line=dict(color='#43A047', width=1.8, dash='dash'),
+                    line=dict(color='#43A047', width=1.8, dash='dot'),
                     showlegend=False, hoverinfo='skip'
                 ), row=row, col=1)
 
@@ -3518,7 +3518,7 @@ def generar_tab_et(dia, forecasts_cache, dias_pred_ui, modulos_kmz=None,
                     x=pred_et['ds'],
                     y=pred_et['yhat'],
                     mode='lines+markers',
-                    line=dict(color='#43A047', width=2.5, dash='dash'),
+                    line=dict(color='#43A047', width=2.5, dash='dot'),
                     marker=dict(size=4, color='#43A047'),
                     name='ET predicha',
                     showlegend=(i == 0),

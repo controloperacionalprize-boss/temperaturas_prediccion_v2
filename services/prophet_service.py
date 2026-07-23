@@ -12,7 +12,7 @@ from prophet import Prophet
 
 from config.config import PROPHET_PARAMS, H_MAX_PENDIENTE, CACHE_DIR, CACHE_PKL, CACHE_HASH, CODE_VERSION
 from services.climatologia_service import calcular_climatologia_armonica, predecir_climatologia_armonica
-from services.enfen_service import obtener_ajuste_enfen
+
 
 
 def _hash_serie(serie_bytes: bytes) -> str:
@@ -176,11 +176,9 @@ def entrenar_prophet_opt(_serie_hash: str, _serie_bytes: bytes, dias_pred: int,
 
     h_arr      = np.arange(1, len(result_futuro) + 1)
     h_efectivo = np.minimum(h_arr, H_MAX_PENDIENTE)
-    ajuste_enfen = obtener_ajuste_enfen(mes_objetivo, anio_objetivo, variable)
-
     bias_h_arr = (
         a_int + b_slope * (len(ult) - 1) + b_slope * h_efectivo
-        + bias_estacional + ajuste_enfen
+        + bias_estacional
     )
     for col in ['yhat', 'yhat_lower', 'yhat_upper']:
         result_futuro[col] = (result_futuro[col] + bias_h_arr).round(2)
