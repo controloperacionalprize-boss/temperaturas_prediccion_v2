@@ -25,7 +25,10 @@ from styles.styles import MAIN_CSS
 from services.data_service import (
     _leer_normales_desde_disco, cargar_catalogo_normales, cargar_normales_dinamico,
     obtener_distritos_senamhi, cargar_temperaturas_distritos,
-    cargar_geojson_peru, get_conn_fabric, cargar_et_mensual_promedio, cargar_datos_clima,
+    cargar_geojson_peru, cargar_datos_sharepoint, cargar_et_mensual_promedio_local,
+)
+from services.sharepoint_service import (
+    get_sp_token_silente, iniciar_device_flow, completar_device_flow,
 )
 from services.map_service import (
     load_kmz_bytes, download_kmz_from_github, disolver_modulos,
@@ -144,40 +147,59 @@ else:
     MEDIA_TMAX2 = Q1_TMAX2 = Q3_TMAX2 = None
     MEDIA_TMIN2 = Q1_TMIN2 = Q3_TMIN2 = None
 
-# ──── CONEXIÓN FABRIC ─────────────────────────────────────────
-if 'conn_fabric' not in st.session_state or st.session_state['conn_fabric'] is None:
-    with st.spinner("Conectando a Fabric..."):
-        st.session_state['conn_fabric'] = get_conn_fabric()
+# ──── AUTENTICACIÓN SHAREPOINT ────────────────────────────────
+if 'sp_token' not in st.session_state:
+    st.session_state['sp_token'] = get_sp_token_silente()
 
-conn_fabric = st.session_state['conn_fabric']
-
-if conn_fabric is None:
-    st.error("❌ No se pudo conectar a Fabric")
+if st.session_state['sp_token'] is None:
+    st.warning("⚠️ Se requiere autenticación con Microsoft 365 para acceder a los archivos de SharePoint.")
+    if st.button("🔑 Conectar con Microsoft 365"):
+        flow = iniciar_device_flow()
+        if "user_code" not in flow:
+            st.error(f"No se pudo iniciar el login: {flow}")
+        else:
+            st.info(
+                f"👉 Ve a **[{flow['verification_uri']}]({flow['verification_uri']})**  \n"
+                f"e ingresa el código: &nbsp; **`{flow['user_code']}`**"
+            )
+            with st.spinner("Esperando que completes el login en el navegador..."):
+                token = completar_device_flow(flow)
+            if token:
+                st.session_state['sp_token'] = token
+                st.rerun()
+            else:
+                st.error("❌ Autenticación fallida. Intenta nuevamente.")
     st.stop()
 
-# ← DEBE ESTAR AQUÍ, justo después de conn_fabric
-df_et_mensual = cargar_et_mensual_promedio(conn_fabric)
+sp_token = st.session_state['sp_token']
 
-# ──── CARGAR DATOS DESDE FABRIC ───────────────────────────────
-with st.spinner("Cargando..."):
+# ──── CARGAR DATOS DESDE SHAREPOINT ───────────────────────────
+with st.spinner("Descargando datos desde SharePoint..."):
     try:
-        df_fabric = cargar_datos_clima(conn_fabric)
-        if df_fabric.empty:
-            st.error("❌ La vista vw_Clima no tiene datos")
+        df_pg = cargar_datos_sharepoint(sp_token)
+        if df_pg.empty:
+            st.error("❌ No se obtuvieron datos de los archivos de SharePoint")
             st.stop()
 
-        fecha_min = pd.to_datetime(df_fabric['Fecha-Hora'], format='mixed', dayfirst=True).min()
-        fecha_max = pd.to_datetime(df_fabric['Fecha-Hora'], format='mixed', dayfirst=True).max()
+        fecha_min = pd.to_datetime(df_pg['Fecha-Hora'], format='mixed', dayfirst=True).min()
+        fecha_max = pd.to_datetime(df_pg['Fecha-Hora'], format='mixed', dayfirst=True).max()
         st.info(
-            f"✅ {len(df_fabric):,} registros desde Fabric\n"
+            f"✅ {len(df_pg):,} registros desde SharePoint\n"
             f"📅 {fecha_min.strftime('%d/%m/%Y')} → {fecha_max.strftime('%d/%m/%Y')}"
         )
     except Exception as e:
-        st.error(f"Error al leer Fabric: {e}")
+        if any(c in str(e) for c in ("401", "403", "token", "Unauthorized")):
+            st.session_state['sp_token'] = None
+            st.error("❌ Token expirado o sin permisos. Recarga la página para reconectar.")
+        else:
+            st.error(f"Error al leer SharePoint: {e}")
         st.stop()
 
+# ← Calculado desde los datos descargados (no requiere conexión separada)
+df_et_mensual = cargar_et_mensual_promedio_local(df_pg)
+
 # ──── FUNDOS MULTISELECT ──────────────────────────────────────
-fundos_disponibles = sorted(df_fabric['Fundo'].dropna().unique().tolist())
+fundos_disponibles = sorted(df_pg['Fundo'].dropna().unique().tolist())
 
 with fundos_disponibles_placeholder:
     fundos_sel = st.multiselect(
@@ -189,9 +211,9 @@ with fundos_disponibles_placeholder:
 fundos_activos = fundos_sel if fundos_sel else fundos_disponibles
 
 # ──── PROCESAR DATOS ─────────────────────────────────────────
-with st.spinner("Procesando datos desde Fabric..."):
+with st.spinner("Procesando datos desde PostgreSQL..."):
     try:
-        df = df_fabric.copy()
+        df = df_pg.copy()
 
         df['Fecha-Hora'] = pd.to_datetime(df['Fecha-Hora'], format='mixed', dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Fecha-Hora'])

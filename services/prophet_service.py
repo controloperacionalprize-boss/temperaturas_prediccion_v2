@@ -283,5 +283,5 @@ def calcular_hash_meteo(dia_full: pd.DataFrame) -> str:
             pd.util.hash_pandas_object(dia_full, index=True).values
         ).hexdigest().encode()
     except Exception:
-        df_hash = b"fabric_hash"
+        df_hash = b"pg_hash"
     return hashlib.md5(df_hash + params_bytes + version_bytes).hexdigest()

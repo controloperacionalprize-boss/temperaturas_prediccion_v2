@@ -4,7 +4,6 @@ import os
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine
 
 from config.config import (
     SHEET_NAME, MIN_REGISTROS, ROLLING_DIAS,
@@ -328,95 +327,129 @@ def cargar_geojson_peru() -> dict | None:
         return None
 
 
-# ── Conexión PostgreSQL ────────────────────────────────────────
+# ── Conexión PostgreSQL (deshabilitado — fuente migrada a SharePoint) ──────────
 
-def _crear_engine_pg():
-    host = st.secrets["PG_HOST"]
-    port = st.secrets["PG_PORT"]
-    db   = st.secrets["PG_DB"]
-    user = st.secrets["PG_USER"]
-    pwd  = st.secrets["PG_PASS"]
-    url  = f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}"
-    return create_engine(url, connect_args={"connect_timeout": 15})
+# def _crear_engine_pg():
+#     host = st.secrets["PG_HOST"]
+#     port = st.secrets["PG_PORT"]
+#     db   = st.secrets["PG_DB"]
+#     user = st.secrets["PG_USER"]
+#     pwd  = st.secrets["PG_PASS"]
+#     url  = f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}"
+#     return create_engine(url, connect_args={"connect_timeout": 15})
+#
+# @st.cache_resource(ttl=3600, show_spinner=False)
+# def get_conn_pg():
+#     try:
+#         return _crear_engine_pg()
+#     except Exception as e:
+#         st.error(f"❌ No se pudo conectar a PostgreSQL: {e}")
+#         return None
+#
+# def ejecutar_query(query: str) -> pd.DataFrame:
+#     import time
+#     for intento in range(3):
+#         try:
+#             conn = get_conn_pg()
+#             if conn is None:
+#                 raise Exception("No se pudo obtener conexión")
+#             return pd.read_sql(query, conn)
+#         except Exception as e:
+#             err = str(e)
+#             if 'connection' in err.lower() or 'timeout' in err.lower():
+#                 if intento < 2:
+#                     get_conn_pg.clear()
+#                     time.sleep(2)
+#                     continue
+#             raise
+#     raise Exception("Falló tras 3 intentos de reconexión")
+#
+# @st.cache_data(ttl=3600, show_spinner=False)
+# def cargar_datos_clima(_conn_pg) -> pd.DataFrame:
+#     df = pd.read_sql("""
+#         SELECT empresa, fundo, fecha_hora, temp_alta_c, temp_baja_c,
+#                et_mm, rad_solar_alta_wm2, rad_solar_wm2
+#         FROM public.rpt_climatologia_prize
+#     """, _conn_pg)
+#     df = df.rename(columns={
+#         "empresa":            "Empresa",
+#         "fundo":              "Fundo",
+#         "fecha_hora":         "Fecha-Hora",
+#         "temp_alta_c":        "TempAlta-C",
+#         "temp_baja_c":        "TempBaja-C",
+#         "et_mm":              "ET-mm",
+#         "rad_solar_wm2":      "RadSolar-W/m2",
+#         "rad_solar_alta_wm2": "RadSolarAlta-W/m2",
+#     })
+#     return df
+#
+# @st.cache_data(ttl=3600, show_spinner=False)
+# def cargar_et_mensual_promedio(_conn_pg) -> pd.DataFrame:
+#     try:
+#         query = """
+#         WITH base AS (
+#             SELECT fundo,
+#                    EXTRACT(YEAR  FROM fecha_hora::date) AS anio,
+#                    EXTRACT(MONTH FROM fecha_hora::date) AS mes,
+#                    SUM(et_mm)                           AS eto_mensual,
+#                    COUNT(DISTINCT fecha_hora::date)     AS dias_con_datos
+#             FROM public.rpt_climatologia_prize
+#             WHERE fecha_hora IS NOT NULL
+#             GROUP BY fundo,
+#                      EXTRACT(YEAR  FROM fecha_hora::date),
+#                      EXTRACT(MONTH FROM fecha_hora::date)
+#         )
+#         SELECT fundo AS "Fundo", mes AS "Mes",
+#                ROUND(AVG(eto_mensual * 1.0 / dias_con_datos)::numeric, 2) AS "EToPromedioDiaria"
+#         FROM base GROUP BY fundo, mes ORDER BY fundo, mes
+#         """
+#         return pd.read_sql(query, _conn_pg)
+#     except Exception as e:
+#         st.error(f"Error al cargar ET mensual: {e}")
+#         return pd.DataFrame()
 
 
-@st.cache_resource(ttl=3600, show_spinner=False)
-def get_conn_fabric():
-    try:
-        return _crear_engine_pg()
-    except Exception as e:
-        st.error(f"❌ No se pudo conectar a PostgreSQL: {e}")
-        return None
+# ── SharePoint ────────────────────────────────────────────────
 
-
-def ejecutar_query(query: str) -> pd.DataFrame:
-    """Ejecuta una query con reconexión automática en caso de fallo."""
-    import time
-    for intento in range(3):
+@st.cache_data(ttl=3600, show_spinner=False)
+def cargar_datos_sharepoint(token: str) -> pd.DataFrame:
+    """Descarga y combina los dos Excels de SharePoint con la misma estructura de columnas."""
+    from services.sharepoint_service import descargar_todos_excels
+    archivos = descargar_todos_excels(token)
+    dfs = []
+    for nombre, file_bytes, hoja in archivos:
         try:
-            conn = get_conn_fabric()
-            if conn is None:
-                raise Exception("No se pudo obtener conexión")
-            return pd.read_sql(query, conn)
+            df = leer_meteo_bytes_optimizado(file_bytes, nombre, hoja)
+            dfs.append(df)
         except Exception as e:
-            err = str(e)
-            if 'connection' in err.lower() or 'timeout' in err.lower():
-                if intento < 2:
-                    get_conn_fabric.clear()
-                    time.sleep(2)
-                    continue
-            raise
-    raise Exception("Falló tras 3 intentos de reconexión")
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cargar_datos_clima(_conn_fabric) -> pd.DataFrame:
-    """Carga la vista vw_clima completa y normaliza nombres de columnas."""
-    df = pd.read_sql("""
-        SELECT empresa, fundo, fecha_hora, temp_alta_c, temp_baja_c,
-               et_mm, rad_solar_alta_wm2, rad_solar_wm2
-        FROM public.rpt_climatologia_prize
-    """, _conn_fabric)
-    df = df.rename(columns={
-        "empresa":            "Empresa",
-        "fundo":              "Fundo",
-        "fecha_hora":         "Fecha-Hora",
-        "temp_alta_c":        "TempAlta-C",
-        "temp_baja_c":        "TempBaja-C",
-        "et_mm":              "ET-mm",
-        "rad_solar_wm2":      "RadSolar-W/m2",
-        "rad_solar_alta_wm2": "RadSolarAlta-W/m2",
-    })
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cargar_et_mensual_promedio(_conn_fabric) -> pd.DataFrame:
-    """Carga ET promedio diario mensual por fundo desde Fabric."""
-    try:
-        query = """
-        WITH base AS (
-            SELECT
-                fundo,
-                EXTRACT(YEAR  FROM fecha_hora::date) AS anio,
-                EXTRACT(MONTH FROM fecha_hora::date) AS mes,
-                SUM(et_mm)                           AS eto_mensual,
-                COUNT(DISTINCT fecha_hora::date)     AS dias_con_datos
-            FROM public.rpt_climatologia_prize
-            WHERE fecha_hora IS NOT NULL
-            GROUP BY fundo,
-                     EXTRACT(YEAR  FROM fecha_hora::date),
-                     EXTRACT(MONTH FROM fecha_hora::date)
-        )
-        SELECT
-            fundo AS "Fundo",
-            mes   AS "Mes",
-            ROUND(AVG(eto_mensual * 1.0 / dias_con_datos)::numeric, 2) AS "EToPromedioDiaria"
-        FROM base
-        GROUP BY fundo, mes
-        ORDER BY fundo, mes
-        """
-        return pd.read_sql(query, _conn_fabric)
-    except Exception as e:
-        st.error(f"Error al cargar ET mensual: {e}")
+            st.warning(f"⚠️ No se pudo procesar '{nombre}': {e}")
+    if not dfs:
         return pd.DataFrame()
+    combined = pd.concat(dfs, ignore_index=True)
+    combined = combined.drop_duplicates(subset=['Fundo', 'Fecha-Hora']).reset_index(drop=True)
+    return combined
+
+
+def cargar_et_mensual_promedio_local(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Calcula ET promedio diario mensual por fundo a partir del DataFrame crudo."""
+    if df_raw.empty or 'ET-mm' not in df_raw.columns:
+        return pd.DataFrame(columns=['Fundo', 'Mes', 'EToPromedioDiaria'])
+    df = df_raw.copy()
+    df['_fecha'] = pd.to_datetime(df['Fecha-Hora'], errors='coerce').dt.normalize()
+    df['ET-mm']  = pd.to_numeric(df['ET-mm'], errors='coerce').fillna(0)
+    df = df.dropna(subset=['_fecha'])
+    df['_anio'] = df['_fecha'].dt.year
+    df['_mes']  = df['_fecha'].dt.month
+    base = (
+        df.groupby(['Fundo', '_anio', '_mes'])
+          .agg(eto_mensual=('ET-mm', 'sum'), dias_con_datos=('_fecha', 'nunique'))
+          .reset_index()
+    )
+    base['et_diaria'] = base['eto_mensual'] / base['dias_con_datos'].replace(0, pd.NA)
+    result = (
+        base.groupby(['Fundo', '_mes'])['et_diaria']
+            .mean().round(2)
+            .reset_index()
+    )
+    result.columns = ['Fundo', 'Mes', 'EToPromedioDiaria']
+    return result.sort_values(['Fundo', 'Mes']).reset_index(drop=True)

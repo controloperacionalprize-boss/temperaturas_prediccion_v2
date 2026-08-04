@@ -30,7 +30,7 @@ PROPHET_PARAMS = {
     "clim_halflife_anios"     : 2.0,
 }
 
-CODE_VERSION = "v2.4-fabric-secrets"
+CODE_VERSION = "v2.4-pg-secrets"
 
 CACHE_DIR  = Path(_APP_DIR) / "assets" / ".prophet_cache"
 CACHE_PKL  = CACHE_DIR / "forecasts.pkl"
