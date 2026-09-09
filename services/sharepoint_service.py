@@ -8,7 +8,7 @@ import streamlit as st
 
 CLIENT_ID  = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 AUTHORITY  = "https://login.microsoftonline.com/aquanqape.onmicrosoft.com"
-SCOPES     = ["https://graph.microsoft.com/.default"]
+SCOPES     = ["Files.Read.All", "Sites.Read.All"]
 GRAPH_URL  = "https://graph.microsoft.com/v1.0"
 SP_SITE    = "aquanqape.sharepoint.com:/sites/OficinasPrizePeru"
 
