@@ -119,6 +119,10 @@ def descargar_todos_excels(token: str) -> list[tuple[str, bytes, str]]:
         try:
             datos = descargar_excel_sp(token, nombre, ruta)
             resultados.append((nombre, datos, hoja))
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403):
+                raise
+            st.warning(f"⚠️ No se pudo descargar '{nombre}': {e}")
         except Exception as e:
             st.warning(f"⚠️ No se pudo descargar '{nombre}': {e}")
     return resultados
