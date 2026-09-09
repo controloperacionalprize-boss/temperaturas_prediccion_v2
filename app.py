@@ -190,7 +190,10 @@ with st.spinner("Descargando datos desde SharePoint..."):
     except Exception as e:
         if any(c in str(e) for c in ("401", "403", "token", "Unauthorized")):
             st.session_state['sp_token'] = None
-            st.error("❌ Token expirado o sin permisos. Recarga la página para reconectar.")
+            from services.sharepoint_service import TOKEN_CACHE_FILE
+            TOKEN_CACHE_FILE.unlink(missing_ok=True)
+            st.cache_data.clear()
+            st.rerun()
         else:
             st.error(f"Error al leer SharePoint: {e}")
         st.stop()
