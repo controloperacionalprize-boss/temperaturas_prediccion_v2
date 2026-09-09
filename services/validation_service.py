@@ -248,6 +248,10 @@ def generar_export_prediccion_historica(dia: pd.DataFrame) -> pd.DataFrame:
     ni un día del mes que predice — incluido el mes en curso, aunque ya haya días reales
     transcurridos de él (se ignoran a propósito, todo sale como predicción del modelo)."""
     fundos = dia['Fundo'].unique().tolist()
+    # El mes en curso se determina con la fecha máxima GLOBAL (no por fundo),
+    # para que fundos con datos rezagados igual reciban predicción del mes actual.
+    fecha_max_global = pd.to_datetime(dia['Fecha'].max()).normalize()
+    mes_actual_ini_global = fecha_max_global.replace(day=1)
     filas  = []
 
     for fundo in fundos:
@@ -256,8 +260,7 @@ def generar_export_prediccion_historica(dia: pd.DataFrame) -> pd.DataFrame:
             continue
         empresa = sub['Empresa'].iloc[0]
 
-        fecha_max      = pd.to_datetime(sub['Fecha'].max()).normalize()
-        mes_actual_ini = fecha_max.replace(day=1)
+        mes_actual_ini = mes_actual_ini_global
 
         piezas = {'Tmax': [], 'Tmin': []}
 

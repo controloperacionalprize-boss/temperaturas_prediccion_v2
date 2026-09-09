@@ -64,7 +64,7 @@ def get_sp_token_silente() -> str | None:
     cuentas = app.get_accounts()
     if not cuentas:
         return None
-    result = app.acquire_token_silent(SCOPES, account=cuentas[0])
+    result = app.acquire_token_silent(SCOPES, account=cuentas[0], force_refresh=True)
     if result and "access_token" in result:
         _guardar_cache(cache)
         return result["access_token"]
