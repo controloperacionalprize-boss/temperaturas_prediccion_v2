@@ -1,17 +1,17 @@
-import io
+import json
 import logging
+import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
-import msal
 import requests
 import streamlit as st
 
 logger = logging.getLogger(__name__)
 
-CLIENT_ID  = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+CLIENT_ID  = "d3590ed6-52b3-4102-aeff-aad2292ab01c"   # Microsoft Office
 AUTHORITY  = "https://login.microsoftonline.com/aquanqape.onmicrosoft.com"
-SCOPES     = ["https://graph.microsoft.com/.default"]
+SCOPE      = "https://graph.microsoft.com/.default offline_access"
 GRAPH_URL  = "https://graph.microsoft.com/v1.0"
 SP_SITE    = "aquanqape.sharepoint.com:/sites/OficinasPrizePeru"
 
@@ -35,74 +35,104 @@ SP_ARCHIVOS = [
 ]
 
 
-# ── Token cache ────────────────────────────────────────────────
+# ── Token cache (JSON simple) ─────────────────────────────────
 
-def _cargar_cache() -> msal.SerializableTokenCache:
-    cache = msal.SerializableTokenCache()
+def _cargar_tokens() -> dict:
     if TOKEN_CACHE_FILE.exists():
-        cache.deserialize(TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
-    return cache
+        try:
+            return json.loads(TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
 
 
-def _guardar_cache(cache: msal.SerializableTokenCache) -> None:
-    if cache.has_state_changed:
-        TOKEN_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_CACHE_FILE.write_text(cache.serialize(), encoding="utf-8")
+def _guardar_tokens(data: dict) -> None:
+    TOKEN_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_CACHE_FILE.write_text(json.dumps(data), encoding="utf-8")
 
 
-def _build_app(cache: msal.SerializableTokenCache) -> msal.PublicClientApplication:
-    return msal.PublicClientApplication(
-        client_id=CLIENT_ID,
-        authority=AUTHORITY,
-        token_cache=cache,
-    )
-
-
-# ── Autenticación ──────────────────────────────────────────────
+# ── Autenticación via device flow (sin MSAL) ──────────────────
 
 def get_sp_token_silente() -> str | None:
-    """Intenta obtener un token Graph silenciosamente desde el caché."""
-    cache = _cargar_cache()
-    app   = _build_app(cache)
-    cuentas = app.get_accounts()
-    st.toast(f"🔍 Cache existe: {TOKEN_CACHE_FILE.exists()} | Cuentas: {len(cuentas)}")
-    if not cuentas:
+    """Intenta refrescar el token con el refresh_token guardado."""
+    tokens = _cargar_tokens()
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        st.toast("🔍 No hay refresh token en cache")
         return None
-    st.toast(f"👤 Cuenta: {cuentas[0].get('username', '?')}")
-    result = app.acquire_token_silent(SCOPES, account=cuentas[0], force_refresh=True)
-    if result and "access_token" in result:
-        _guardar_cache(cache)
-        token = result["access_token"]
-        st.toast(f"✅ Token silente OK (len={len(token)}, scopes={result.get('scope', '?')})")
-        return token
-    error = result.get("error", "?") if result else "None"
-    error_desc = result.get("error_description", "") if result else ""
-    st.toast(f"❌ Token silente falló: {error} - {error_desc[:100]}")
+
+    st.toast("🔄 Intentando refresh token...")
+    resp = requests.post(f"{AUTHORITY}/oauth2/v2.0/token", data={
+        "client_id": CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": SCOPE,
+    }, timeout=30)
+
+    data = resp.json()
+    if "access_token" in data:
+        _guardar_tokens({
+            "access_token": data["access_token"],
+            "refresh_token": data.get("refresh_token", refresh_token),
+        })
+        st.toast(f"✅ Token refreshed OK (len={len(data['access_token'])})")
+        return data["access_token"]
+
+    st.toast(f"❌ Refresh falló: {data.get('error', '?')} - {data.get('error_description', '')[:100]}")
+    TOKEN_CACHE_FILE.unlink(missing_ok=True)
     return None
 
 
 def iniciar_device_flow() -> dict:
-    """Inicia el flujo de dispositivo para autenticación interactiva."""
-    cache = _cargar_cache()
-    app   = _build_app(cache)
-    flow = app.initiate_device_flow(scopes=SCOPES)
-    st.toast(f"🔄 Device flow iniciado: {'user_code' in flow}")
-    return flow
+    """Inicia el device flow directamente con la API de Microsoft."""
+    resp = requests.post(f"{AUTHORITY}/oauth2/v2.0/devicecode", data={
+        "client_id": CLIENT_ID,
+        "scope": SCOPE,
+    }, timeout=30)
+    data = resp.json()
+    st.toast(f"🔄 Device flow: {'user_code' in data}")
+    if not resp.ok or "device_code" not in data:
+        return {"error": data.get("error_description", "Error al conectar con Microsoft")}
+    return {
+        "device_code": data["device_code"],
+        "user_code": data["user_code"],
+        "verification_uri": data.get("verification_uri", "https://microsoft.com/devicelogin"),
+        "expires_in": data.get("expires_in", 900),
+        "interval": data.get("interval", 5),
+    }
 
 
 def completar_device_flow(flow: dict) -> str | None:
-    """Completa el device flow; retorna access_token si fue exitoso."""
-    cache = _cargar_cache()
-    app   = _build_app(cache)
-    result = app.acquire_token_by_device_flow(flow)
-    if "access_token" in result:
-        _guardar_cache(cache)
-        token = result["access_token"]
-        st.toast(f"✅ Device flow OK (len={len(token)}, scopes={result.get('scope', '?')})")
-        return token
-    error = result.get("error", "?")
-    error_desc = result.get("error_description", "")
-    st.toast(f"❌ Device flow falló: {error} - {error_desc[:200]}")
+    """Hace polling hasta que el usuario complete el login."""
+    device_code = flow.get("device_code")
+    interval = flow.get("interval", 5)
+    expires_in = flow.get("expires_in", 900)
+    deadline = time.time() + expires_in
+
+    while time.time() < deadline:
+        resp = requests.post(f"{AUTHORITY}/oauth2/v2.0/token", data={
+            "client_id": CLIENT_ID,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": device_code,
+        }, timeout=30)
+        data = resp.json()
+
+        if data.get("error") in ("authorization_pending", "slow_down"):
+            time.sleep(interval)
+            continue
+
+        if "access_token" in data:
+            _guardar_tokens({
+                "access_token": data["access_token"],
+                "refresh_token": data.get("refresh_token", ""),
+            })
+            st.toast(f"✅ Login OK (scopes={data.get('scope', '?')[:80]})")
+            return data["access_token"]
+
+        st.toast(f"❌ Device flow error: {data.get('error', '?')} - {data.get('error_description', '')[:150]}")
+        return None
+
+    st.toast("❌ Device flow expiró")
     return None
 
 
@@ -112,15 +142,9 @@ def completar_device_flow(flow: dict) -> str | None:
 def _get_site_id(token: str) -> str:
     headers = {"Authorization": f"Bearer {token}"}
     url  = f"{GRAPH_URL}/sites/{SP_SITE}"
-    st.toast(f"🌐 GET site_id: {url}")
     resp = requests.get(url, headers=headers, timeout=30)
-    st.toast(f"📡 Site response: {resp.status_code}")
-    if resp.status_code != 200:
-        st.toast(f"❌ Site error body: {resp.text[:300]}")
     resp.raise_for_status()
-    site_id = resp.json()["id"]
-    st.toast(f"✅ Site ID: {site_id[:50]}...")
-    return site_id
+    return resp.json()["id"]
 
 
 def descargar_excel_sp(token: str, nombre: str, ruta: str) -> bytes:
@@ -129,11 +153,7 @@ def descargar_excel_sp(token: str, nombre: str, ruta: str) -> bytes:
     site_id  = _get_site_id(token)
     encoded  = quote(ruta)
     url      = f"{GRAPH_URL}/sites/{site_id}/drive/root:/{encoded}:/content"
-    st.toast(f"📥 Descargando {nombre}: {url[:100]}...")
     resp     = requests.get(url, headers=headers, timeout=120)
-    st.toast(f"📡 {nombre}: status={resp.status_code}, len={len(resp.content)}")
-    if resp.status_code != 200:
-        st.toast(f"❌ {nombre} error: {resp.text[:300]}")
     resp.raise_for_status()
     return resp.content
 
