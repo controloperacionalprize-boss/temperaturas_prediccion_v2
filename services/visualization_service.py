@@ -208,6 +208,14 @@ def generar_figura(variable: str, dia: pd.DataFrame,
 
         pred_fc = ajustar_prediccion_patron(pred_fc, sub, variable)
 
+        if not pred_fc.empty:
+            pred_export = pred_fc[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+            pred_export = pred_export.rename(columns={'ds': 'Fecha', 'yhat': variable})
+            pred_export['Fundo'] = fundo
+            pred_export['Empresa'] = sub['Empresa'].iloc[0]
+            pred_export['Variable'] = variable
+            rows_pred_export.append(pred_export)
+
         lg = fundo
 
         # ── Climatología Guadalupe ─────────────────────────────

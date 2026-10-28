@@ -545,12 +545,16 @@ with tab_datos:
     if not df_hist_all.empty:
         df_hist_all['Fecha'] = pd.to_datetime(df_hist_all['Fecha']).dt.strftime('%Y/%m/%d')
 
+    df_pred_futuro_all = pd.concat([df_tmax_pred, df_tmin_pred], ignore_index=True)
+    if not df_pred_futuro_all.empty:
+        df_pred_futuro_all['Fecha'] = pd.to_datetime(df_pred_futuro_all['Fecha']).dt.strftime('%Y/%m/%d')
+
     anio_clima  = pd.Timestamp.today().year
     df_clima_anual = generar_climatologia_diaria_anual(
         anio_clima, MEDIA_TMAX, Q1_TMAX, Q3_TMAX, MEDIA_TMIN, Q1_TMIN, Q3_TMIN
     )
 
-    col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+    col_d1, col_d2, col_d3, col_d4, col_d5 = st.columns(5)
 
     with col_d1:
         if not df_pred_export.empty:
@@ -582,6 +586,17 @@ with tab_datos:
                 use_container_width=True
             )
     with col_d4:
+        if not df_pred_futuro_all.empty:
+            st.download_button(
+                label="📥 Excel predicción futura",
+                data=exportar_excel_tabla(df_pred_futuro_all, 'Prediccion_Futura'),
+                file_name="Prediccion_futura_Aquanqa.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        else:
+            st.caption("Sin predicción futura disponible.")
+    with col_d5:
         st.download_button(
             label=f"📥 Excel climatología diaria {anio_clima}",
             data=exportar_excel_tabla(df_clima_anual, 'Climatologia'),
